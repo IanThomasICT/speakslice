@@ -42,3 +42,8 @@ build/
 test/fixtures/*.wav
 test/fixtures/*.mp3
 test/fixtures/*.mp4
+
+*.mp4
+*.m4a
+*.mp3
+*.wav

@@ -3,3 +3,12 @@ faster-whisper==1.0.3
 torch==2.4.0
 numpy==1.26.4
 soundfile==0.12.1
+
+# System CLI Tools (install separately, not via pip)
+# yt-dlp: YouTube downloader CLI tool
+#   Ubuntu/Debian: sudo apt install yt-dlp
+#   macOS: brew install yt-dlp
+#   Or: pip install yt-dlp (alternative to system package)
+# ffmpeg: Audio/video preprocessing (already required for SpeakSlice)
+#   Ubuntu/Debian: sudo apt install ffmpeg
+#   macOS: brew install ffmpeg
