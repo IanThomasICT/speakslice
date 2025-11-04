@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  speakslice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: speakslice
+    environment:
+      - ASR_MODEL=medium
+      - PORT=8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./cache:/root/.cache  # Cache models between runs

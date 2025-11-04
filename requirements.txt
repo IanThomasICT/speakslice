@@ -1,0 +1,5 @@
+pyannote.audio==3.1.1
+faster-whisper==1.0.3
+torch==2.4.0
+numpy==1.26.4
+soundfile==0.12.1

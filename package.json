@@ -1,0 +1,20 @@
+{
+  "name": "speakslice",
+  "version": "1.0.0",
+  "description": "FREE, CPU-first speaker diarization and transcription service",
+  "scripts": {
+    "dev": "bun run --hot src/server.ts",
+    "start": "bun run src/server.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch"
+  },
+  "dependencies": {
+    "hono": "^4.10.4",
+    "nanoid": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "^5.3.3"
+  }
+}
