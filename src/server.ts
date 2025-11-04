@@ -1,6 +1,7 @@
 // Core imports: Hono for lightweight HTTP routing, Bun for serve() built-in
 // nanoid generates unique IDs for temp directories to avoid file conflicts
 import { Hono } from "hono";
+import { logger } from "hono/logger";
 import { serve } from "bun";
 import { nanoid } from "nanoid";
 // spawn() creates child processes to run Python scripts and capture their output
@@ -9,6 +10,7 @@ import { spawn } from "node:child_process";
 import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { parseArgs } from "node:util";
 
 // Type definitions for ASR (Automatic Speech Recognition) and diarization outputs
 // Word: individual word with timing and confidence from Whisper
@@ -18,25 +20,63 @@ type ASRSeg = { start: number; end: number; text: string; avg_confidence?: numbe
 // DiarSeg: speaker segments from pyannote with overlap detection flag
 type DiarSeg = { start: number; end: number; speaker: string; has_overlap: boolean };
 
+// Parse CLI arguments for debug flag
+const { values } = parseArgs({
+  args: Bun.argv,
+  options: {
+    debug: { type: "boolean" as const, short: "d", default: false },
+  },
+  strict: false,
+  allowPositionals: true,
+});
+
+const DEBUG = values.debug || false;
+
+// Debug logging helper - only outputs when --debug flag is set
+// Format: [HH:MM:SS] STAGE: message { metadata }
+function debug(stage: string, message: string, meta?: object) {
+  if (!DEBUG) return;
+  const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+  const metaStr = meta ? ' ' + JSON.stringify(meta, null, 2) : '';
+  console.log(`[${timestamp}] ${stage}: ${message}${metaStr}`);
+}
+
 const app = new Hono();
+
+// Add HTTP request logging middleware (shows METHOD PATH STATUS TIMING)
+app.use(logger());
 
 // Configuration: Allow overriding via env vars for flexibility
 // Default to "medium" Whisper model for balanced speed/accuracy tradeoff
 const ASR_MODEL = process.env.ASR_MODEL || "medium";
 const DIARIZE_SCRIPT = process.env.DIARIZE_SCRIPT || "./src/scripts/diarize.py";
 const TRANSCRIBE_SCRIPT = process.env.TRANSCRIBE_SCRIPT || "./src/scripts/transcribe.py";
-const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+// Use virtual environment Python if it exists, otherwise fall back to system python3
+const PYTHON_BIN = process.env.PYTHON_BIN ||
+  (await fs.access(".venv/bin/python").then(() => ".venv/bin/python").catch(() => "python3"));
 
 // Convert any audio format to standardized 16kHz mono WAV for ML models
 // Why: pyannote and faster-whisper require consistent audio format (16kHz, mono, WAV)
 // -ac 1 = mono, -ar 16000 = 16kHz sample rate, pcm_s16le = 16-bit PCM encoding
 async function runFfmpegToWav16kMono(src: string, dst: string) {
   const args = ["-y", "-i", src, "-ac", "1", "-ar", "16000", "-vn", "-c:a", "pcm_s16le", dst];
+  debug("FFMPEG", "Preprocessing started", { input: path.basename(src), output: path.basename(dst) });
+  const start = Date.now();
+
   await new Promise<void>((resolve, reject) => {
     const p = spawn("ffmpeg", args);
     let err = "";
     p.stderr.on("data", (d) => (err += d.toString()));
-    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(err))));
+    p.on("close", (code) => {
+      if (code === 0) {
+        const elapsed = Date.now() - start;
+        debug("FFMPEG", "Preprocessing complete", { elapsed_ms: elapsed });
+        resolve();
+      } else {
+        debug("FFMPEG", "Preprocessing failed", { error: err.substring(0, 200) });
+        reject(new Error(err));
+      }
+    });
   });
 }
 
@@ -59,7 +99,9 @@ async function getDurationSec(wavPath: string): Promise<number | null> {
     p.stdout.on("data", (d) => (out += d.toString()));
     p.on("close", () => {
       const v = parseFloat(out.trim());
-      resolve(Number.isFinite(v) ? Math.round(v * 1000) / 1000 : null);
+      const duration = Number.isFinite(v) ? Math.round(v * 1000) / 1000 : null;
+      debug("FFPROBE", "Duration extracted", { duration_sec: duration });
+      resolve(duration);
     });
   });
 }
@@ -76,6 +118,13 @@ async function callDiarizationScript(
   if (opts.min_speaker_duration != null) args.push("--min-speaker-duration", String(opts.min_speaker_duration));
   if (opts.enable_overlap != null) args.push("--enable-overlap", String(opts.enable_overlap));
 
+  debug("DIARIZATION", "Spawning script", {
+    script: path.basename(DIARIZE_SCRIPT),
+    wav: path.basename(wavPath),
+    max_speakers: opts.max_speakers,
+  });
+  const start = Date.now();
+
   return new Promise((resolve, reject) => {
     const p = spawn(PYTHON_BIN, args);
     let stdout = "";
@@ -83,13 +132,23 @@ async function callDiarizationScript(
     p.stdout.on("data", (d) => (stdout += d.toString()));
     p.stderr.on("data", (d) => (stderr += d.toString()));
     p.on("close", (code) => {
+      const elapsed = Date.now() - start;
       if (code !== 0) {
+        debug("DIARIZATION", "Script failed", { exit_code: code, error: stderr.substring(0, 200) });
         reject(new Error(`Diarization script failed: ${stderr}`));
       } else {
         try {
           const result = JSON.parse(stdout);
-          resolve((result.segments ?? []) as DiarSeg[]);
+          const segments = (result.segments ?? []) as DiarSeg[];
+          const speakers = new Set(segments.map(s => s.speaker)).size;
+          debug("DIARIZATION", "Complete", {
+            segments: segments.length,
+            speakers,
+            elapsed_ms: elapsed,
+          });
+          resolve(segments);
         } catch (e) {
+          debug("DIARIZATION", "Parse failed", { error: String(e), output_preview: stdout.substring(0, 100) });
           reject(new Error(`Failed to parse diarization output: ${e}`));
         }
       }
@@ -101,6 +160,9 @@ async function callDiarizationScript(
 // Why: Combine "who spoke" (diarization) with "what was said" (ASR) for complete transcript
 // Uses efficient sliding window approach - maintains pointer to avoid re-scanning words
 function alignWordsToDiarization(words: Word[], diar: DiarSeg[]) {
+  debug("ALIGN", "Started", { words: words.length, diar_segments: diar.length });
+  const start = Date.now();
+
   const aligned = [];
   let wi = 0; // word index pointer - avoids O(n²) by not re-scanning from start
   for (const seg of diar) {
@@ -125,6 +187,9 @@ function alignWordsToDiarization(words: Word[], diar: DiarSeg[]) {
       words: segWords,
     });
   }
+
+  const elapsed = Date.now() - start;
+  debug("ALIGN", "Complete", { speaker_segments: aligned.length, elapsed_ms: elapsed });
   return aligned;
 }
 
@@ -138,6 +203,14 @@ async function transcribeWithWhisper(
   const args = [TRANSCRIBE_SCRIPT, wavPath, "--model", opts.model];
   if (opts.language && opts.language !== "auto") args.push("--language", opts.language);
 
+  debug("ASR", "Spawning script", {
+    script: path.basename(TRANSCRIBE_SCRIPT),
+    wav: path.basename(wavPath),
+    model: opts.model,
+    language: opts.language,
+  });
+  const start = Date.now();
+
   return new Promise((resolve, reject) => {
     const p = spawn(PYTHON_BIN, args);
     let stdout = "";
@@ -145,17 +218,28 @@ async function transcribeWithWhisper(
     p.stdout.on("data", (d) => (stdout += d.toString()));
     p.stderr.on("data", (d) => (stderr += d.toString()));
     p.on("close", (code) => {
+      const elapsed = Date.now() - start;
       if (code !== 0) {
+        debug("ASR", "Script failed", { exit_code: code, error: stderr.substring(0, 200) });
         reject(new Error(`Transcription script failed: ${stderr}`));
       } else {
         try {
           const result = JSON.parse(stdout);
+          const words = result.words ?? [];
+          const segments = result.segments ?? [];
+          debug("ASR", "Complete", {
+            words: words.length,
+            segments: segments.length,
+            language: result.language,
+            elapsed_ms: elapsed,
+          });
           resolve({
-            words: result.words ?? [],
-            segments: result.segments ?? [],
+            words,
+            segments,
             language: result.language,
           });
         } catch (e) {
+          debug("ASR", "Parse failed", { error: String(e), output_preview: stdout.substring(0, 100) });
           reject(new Error(`Failed to parse transcription output: ${e}`));
         }
       }
@@ -367,12 +451,17 @@ app.get("/v1/health", async (c) => {
 // Why: Single endpoint simplifies client integration; all processing happens server-side
 // Flow: multipart upload → temp storage → ffmpeg conversion → parallel ASR+diarization → alignment
 app.post("/v1/process", async (c) => {
+  const requestStart = Date.now();
+
   // Parse multipart form data - Hono provides built-in parser for file uploads
   const form = await c.req.parseBody();
   const file = form["file"];
   if (!file || !(file as File).stream) {
     return c.text("file is required (multipart/form-data)", 400);
   }
+
+  const filename = (file as File).name || "unknown";
+  const contentType = (file as File).type || "unknown";
 
   // Extract optional parameters with sensible defaults
   // Why defaults: most users want medium model, auto language detection, no speaker limit
@@ -399,6 +488,17 @@ app.post("/v1/process", async (c) => {
   const srcPath = path.join(tmpDir, "input.bin");
   const outWav = path.join(tmpDir, "audio.wav");
 
+  debug("UPLOAD", "File received", {
+    filename,
+    content_type: contentType,
+    request_id: id,
+    asr_model: asrModel,
+    language,
+    max_speakers: maxSpeakers,
+  });
+
+  debug("TEMP", "Directory created", { path: tmpDir, id });
+
   // Stream uploaded file to disk (handles large files without memory overflow)
   const write = createWriteStream(srcPath);
   const stream = (file as File).stream();
@@ -408,12 +508,21 @@ app.post("/v1/process", async (c) => {
     if (done) break;
     write.write(value);
   }
-  write.end();
+
+  // Wait for write stream to finish before proceeding
+  await new Promise<void>((resolve, reject) => {
+    write.on('finish', resolve);
+    write.on('error', reject);
+    write.end();
+  });
 
   try {
     // Enforce 2GB size limit to prevent memory/disk issues with huge files
     const stat = await fs.stat(srcPath);
+    debug("UPLOAD", "File written to disk", { size_bytes: stat.size, size_mb: (stat.size / 1024 / 1024).toFixed(2) });
+
     if (stat.size > 2 * 1024 * 1024 * 1024) {
+      debug("UPLOAD", "File too large, rejecting", { size_bytes: stat.size });
       return c.text("File too large", 413);
     }
 
@@ -425,6 +534,9 @@ app.post("/v1/process", async (c) => {
     // Key optimization: Run ASR and diarization in parallel (both read same WAV file)
     // Why: Saves ~50% processing time since operations are independent
     // Both use CPU-only inference, so no GPU contention
+    debug("PIPELINE", "Starting parallel processing", { diarization: "pyannote", asr: asrModel });
+    const parallelStart = Date.now();
+
     const [diarSegments, asrResult] = await Promise.all([
       callDiarizationScript(outWav, {
         max_speakers: maxSpeakers,
@@ -434,14 +546,17 @@ app.post("/v1/process", async (c) => {
       transcribeWithWhisper(outWav, { model: asrModel, language }),
     ]);
 
+    const parallelElapsed = Date.now() - parallelStart;
+    debug("PIPELINE", "Parallel processing complete", { elapsed_ms: parallelElapsed });
+
     // Sort by timestamp for chronological order, then align words to speakers
     diarSegments.sort((a, b) => a.start - b.start);
     const words = asrResult.words.sort((a, b) => a.start - b.start);
     const aligned = alignWordsToDiarization(words, diarSegments);
 
-    // Return comprehensive JSON with all data: raw + aligned transcripts
-    return c.json({
-      file: (c.req.header("x-filename") as string) || "upload",
+    const totalElapsed = Date.now() - requestStart;
+    const responsePayload = {
+      file: (c.req.header("x-filename") as string) || filename || "upload",
       duration_sec: duration,
       sample_rate: 16000,
       diarization: { segments: diarSegments },
@@ -457,22 +572,46 @@ app.post("/v1/process", async (c) => {
           asr: `whisper-${asrModel}`,
         },
       },
+    };
+
+    const payloadSize = JSON.stringify(responsePayload).length;
+    debug("RESPONSE", "Payload generated", {
+      size_bytes: payloadSize,
+      size_kb: (payloadSize / 1024).toFixed(2),
+      total_elapsed_ms: totalElapsed,
     });
+
+    // Return comprehensive JSON with all data: raw + aligned transcripts
+    return c.json(responsePayload);
   } catch (e: any) {
+    debug("ERROR", "Request failed", {
+      error: e.message ?? String(e),
+      stack: e.stack?.substring(0, 300),
+    });
     return c.json({ error: e.message ?? String(e) }, 500);
   } finally {
     // Always cleanup temp files, even on error (prevents disk space leaks)
+    debug("CLEANUP", "Removing temp directory", { path: tmpDir });
     try {
       await fs.rm(tmpDir, { recursive: true, force: true });
-    } catch {}
+      debug("CLEANUP", "Complete", { path: tmpDir });
+    } catch (cleanupErr: any) {
+      debug("CLEANUP", "Failed", { error: cleanupErr.message });
+    }
   }
 });
 
 // Start Bun server - uses native HTTP server (faster than Node.js)
 // Why Bun: Built-in TypeScript support, fast startup, includes Node.js APIs
+const PORT = Number(process.env.PORT || 8000);
+
 serve({
   fetch: app.fetch,
-  port: Number(process.env.PORT || 8000),
+  port: PORT,
 });
 
-console.log(`SpeakSlice API running on port ${process.env.PORT || 8000}`);
+console.log(`SpeakSlice API running on port ${PORT}`);
+if (DEBUG) {
+  console.log(`[DEBUG MODE ENABLED] Using Python: ${PYTHON_BIN}`);
+  console.log(`[DEBUG MODE ENABLED] ASR Model: ${ASR_MODEL}`);
+}

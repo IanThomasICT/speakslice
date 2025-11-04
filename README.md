@@ -14,6 +14,8 @@ SpeakSlice takes audio files (mp3/mp4/wav) and returns:
 - **Parallel processing**: ASR and diarization run concurrently
 - **Docker support**: One command to run everything
 - **Flexible models**: Choose from tiny/base/small/medium Whisper models
+- **Web UI**: Built-in testing interface at `/app` with Tailwind styling
+- **YouTube support**: Download and process videos with time-based cropping
 
 ## Architecture
 
@@ -68,6 +70,20 @@ docker compose up --build
 ```
 
 ## API Endpoints
+
+### Web UI
+
+Access the testing interface at:
+```
+http://localhost:8000/app
+```
+
+Features:
+- File upload (MP3/MP4/WAV)
+- Model configuration (ASR model, language, speaker count)
+- Live processing status
+- Speaker-segmented transcript display
+- Raw JSON response viewer
 
 ### Health Check
 
@@ -170,12 +186,15 @@ curl -X POST http://localhost:8000/v1/process \
 ```
 speakslice/
 ├── src/
-│   ├── server.ts              # Hono API (TypeScript/Bun)
+│   ├── server.ts              # Hono API with /app UI and /v1 endpoints
+│   ├── server.test.ts         # Bun unit tests
 │   └── scripts/
-│       ├── diarize.py        # Diarization CLI script
-│       └── transcribe.py     # ASR CLI script
+│       ├── diarize.py         # Diarization CLI script
+│       ├── transcribe.py      # ASR CLI script
+│       └── download_youtube.py # YouTube download utility (yt-dlp)
 ├── specs/
 │   └── prd.md                # Product requirements document
+├── test/                      # Test fixtures directory
 ├── tsconfig.json             # TypeScript config
 ├── package.json              # Bun dependencies
 ├── requirements.txt          # Python dependencies
@@ -216,6 +235,27 @@ See [CLAUDE.md](./CLAUDE.md) for detailed development guidelines and architectur
 
 ## Testing
 
+### Web UI (E2E Testing)
+The easiest way to test the complete pipeline:
+
+1. Start the server: `bun run dev`
+2. Open browser: `http://localhost:8000/app`
+3. Upload an audio file and verify results
+
+The web UI provides a complete interface for uploading files, configuring options, and viewing results with speaker-segmented transcripts.
+
+### Unit Tests
+Run Bun tests for TypeScript code:
+
+```bash
+# Run all tests
+bun test
+
+# Watch mode
+bun test --watch
+```
+
+### Python Script Tests
 Test Python scripts independently:
 
 ```bash
@@ -227,6 +267,9 @@ python src/scripts/diarize.py audio.wav --max-speakers 3
 
 # Test transcription
 python src/scripts/transcribe.py audio.wav --model medium
+
+# Test YouTube download (requires yt-dlp and ffmpeg)
+python src/scripts/download_youtube.py "https://youtube.com/watch?v=VIDEO_ID" --output test.wav --start "0:30" --end "1:45"
 ```
 
 ## License

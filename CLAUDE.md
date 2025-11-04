@@ -27,7 +27,8 @@ This is NOT a microservices architecture. It's a single-process Hono API that sp
 **Python Layer (CLI Scripts)**:
 - `src/scripts/diarize.py` - Pyannote-based diarization, outputs JSON to stdout
 - `src/scripts/transcribe.py` - Faster-whisper ASR, outputs JSON to stdout
-- Both scripts are stateless: read file path from args, write JSON to stdout
+- `src/scripts/download_youtube.py` - yt-dlp wrapper for YouTube downloads with time cropping
+- All scripts are stateless: read args, write JSON to stdout
 - No FastAPI, no HTTP servers, no network calls between components
 
 **Communication Flow**:
@@ -69,6 +70,12 @@ python src/scripts/diarize.py test.wav --max-speakers 2
 
 # Test transcription
 python src/scripts/transcribe.py test.wav --model tiny
+
+# Test YouTube download (requires yt-dlp CLI installed)
+python src/scripts/download_youtube.py "https://youtube.com/watch?v=VIDEO_ID" \
+  --output test.wav \
+  --start "0:30" \
+  --end "1:45"
 ```
 
 ### E2E Testing
@@ -121,6 +128,15 @@ curl -X POST http://localhost:8000/v1/process \
 ```
 
 ## Implementation Guidelines
+
+### Web UI Endpoint
+
+The `/app` endpoint returns HTML with inline Tailwind v4 styling (via CDN):
+- Use `c.html()` from Hono to return HTML strings
+- Include Tailwind v4: `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+- Keep UI simple and functional (no complex JavaScript frameworks)
+- Use fetch API to call `/v1/process` endpoint
+- Display results in a readable format with speaker segmentation
 
 ### Python Scripts Must Follow This Pattern
 
@@ -201,6 +217,35 @@ const [diarSegments, asrResult] = await Promise.all([
 - Clean up temp files in `finally` blocks
 - Preprocessed audio must be: mono, 16kHz, WAV format (use ffmpeg)
 
+### YouTube Download Script (download_youtube.py)
+
+Optional utility script for downloading YouTube audio/video with time-based cropping:
+
+**Features**:
+- yt-dlp wrapper with security validation (no shell injection)
+- Time-based cropping using ffmpeg (supports SS, MM:SS, HH:MM:SS formats)
+- Input validation (YouTube URL format, time ranges, paths)
+- Dependency checking (validates yt-dlp and ffmpeg are installed)
+- Outputs JSON to stdout with metadata
+
+**Usage Pattern**:
+```python
+# Download full audio as WAV
+python src/scripts/download_youtube.py "URL" --output file.wav
+
+# Download audio segment (cropped)
+python src/scripts/download_youtube.py "URL" --output clip.wav --start "1:30" --end "3:45"
+
+# Download video segment
+python src/scripts/download_youtube.py "URL" --output clip.mp4 --format video --start "90" --end "225"
+```
+
+**Security Notes**:
+- Uses subprocess.run() with explicit args (no shell=True)
+- Validates YouTube URL format before execution
+- Sanitizes file paths using Path.resolve()
+- Sets timeouts to prevent hanging downloads
+
 ## Dependencies
 
 **Python** (CPU-optimized):
@@ -215,8 +260,9 @@ const [diarSegments, asrResult] = await Promise.all([
 - Bun runtime (includes Node.js APIs)
 
 **System**:
-- `ffmpeg` - Audio preprocessing
+- `ffmpeg` - Audio preprocessing and video processing
 - `python3` - Script execution
+- `yt-dlp` - (Optional) YouTube download for download_youtube.py script
 
 ## Response Format
 
@@ -258,17 +304,22 @@ All `/v1/process` responses follow this structure:
 ```
 speakslice/
 ├── src/
-│   ├── server.ts          # Hono API (TypeScript/Bun)
+│   ├── server.ts              # Hono API with /app UI and /v1 endpoints
+│   ├── server.test.ts         # Bun unit tests for alignment logic
 │   └── scripts/
-│       ├── diarize.py    # Diarization CLI script
-│       └── transcribe.py # ASR CLI script
+│       ├── diarize.py         # Diarization CLI script (pyannote)
+│       ├── transcribe.py      # ASR CLI script (faster-whisper)
+│       └── download_youtube.py # YouTube download utility (yt-dlp wrapper)
 ├── specs/
-│   └── prd.md            # Product requirements document
-├── tsconfig.json         # TS config
-├── package.json          # Bun dependencies
-├── requirements.txt      # Python dependencies
-├── Dockerfile            # Single container with Bun + Python
-├── docker-compose.yml    # Optional compose config
-├── cache/                # Model cache (mounted volume)
-└── CLAUDE.md             # Development guidelines
+│   └── prd.md                 # Product requirements document
+├── test/
+│   ├── fixtures/              # Test audio files (gitignored)
+│   └── scripts/               # Test scripts
+├── tsconfig.json              # TS config
+├── package.json               # Bun dependencies + test scripts
+├── requirements.txt           # Python dependencies
+├── Dockerfile                 # Single container with Bun + Python
+├── docker-compose.yml         # Optional compose config
+├── cache/                     # Model cache (mounted volume)
+└── CLAUDE.md                  # Development guidelines
 ```
