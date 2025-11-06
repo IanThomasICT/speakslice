@@ -80,6 +80,21 @@ async function runFfmpegToWav16kMono(src: string, dst: string) {
   });
 }
 
+// Create cache directory path based on current datetime in local timezone
+// Format: cache/YYYYMMDD-HHmm/
+// Why: Organizes outputs chronologically, easy to find recent processings
+function getCacheDirPath(): string {
+  const now = new Date();
+  // Get local timezone components (already in local time by default)
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hour = String(now.getHours()).padStart(2, '0');
+  const minute = String(now.getMinutes()).padStart(2, '0');
+  const dateStr = `${year}${month}${day}-${hour}${minute}`;
+  return path.join("cache", dateStr);
+}
+
 // Extract audio duration using ffprobe for metadata in response
 // Why: Useful for clients to know file length without downloading/parsing entire file
 // Returns duration in seconds rounded to 3 decimal places, or null if parsing fails
@@ -126,11 +141,21 @@ async function callDiarizationScript(
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const p = spawn(PYTHON_BIN, args);
+    // Pass environment variables to child process (includes HF_TOKEN from .env)
+    const p = spawn(PYTHON_BIN, args, { env: process.env });
     let stdout = "";
     let stderr = "";
     p.stdout.on("data", (d) => (stdout += d.toString()));
-    p.stderr.on("data", (d) => (stderr += d.toString()));
+    p.stderr.on("data", (d) => {
+      stderr += d.toString();
+      // Log progress messages from Python script in real-time
+      const lines = d.toString().split('\n');
+      for (const line of lines) {
+        if (line.includes('[PROGRESS]')) {
+          debug("DIARIZATION", line.replace('[PROGRESS]', '').trim(), {});
+        }
+      }
+    });
     p.on("close", (code) => {
       const elapsed = Date.now() - start;
       if (code !== 0) {
@@ -212,11 +237,21 @@ async function transcribeWithWhisper(
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const p = spawn(PYTHON_BIN, args);
+    // Pass environment variables to child process (includes HF_TOKEN from .env)
+    const p = spawn(PYTHON_BIN, args, { env: process.env });
     let stdout = "";
     let stderr = "";
     p.stdout.on("data", (d) => (stdout += d.toString()));
-    p.stderr.on("data", (d) => (stderr += d.toString()));
+    p.stderr.on("data", (d) => {
+      stderr += d.toString();
+      // Log progress messages from Python script in real-time
+      const lines = d.toString().split('\n');
+      for (const line of lines) {
+        if (line.includes('[PROGRESS]')) {
+          debug("ASR", line.replace('[PROGRESS]', '').trim(), {});
+        }
+      }
+    });
     p.on("close", (code) => {
       const elapsed = Date.now() - start;
       if (code !== 0) {
@@ -580,6 +615,35 @@ app.post("/v1/process", async (c) => {
       size_kb: (payloadSize / 1024).toFixed(2),
       total_elapsed_ms: totalElapsed,
     });
+
+    // Save outputs to cache directory for persistence
+    const cacheDir = getCacheDirPath();
+    await fs.mkdir(cacheDir, { recursive: true });
+
+    // Save individual components
+    await fs.writeFile(
+      path.join(cacheDir, "diarization.json"),
+      JSON.stringify({ segments: diarSegments }, null, 2)
+    );
+    await fs.writeFile(
+      path.join(cacheDir, "asr.json"),
+      JSON.stringify({
+        language: asrResult.language,
+        words,
+        segments: asrResult.segments,
+      }, null, 2)
+    );
+    await fs.writeFile(
+      path.join(cacheDir, "aligned.json"),
+      JSON.stringify({ speaker_segments: aligned }, null, 2)
+    );
+    // Save complete response
+    await fs.writeFile(
+      path.join(cacheDir, "response.json"),
+      JSON.stringify(responsePayload, null, 2)
+    );
+
+    debug("CACHE", "Outputs saved", { path: cacheDir });
 
     // Return comprehensive JSON with all data: raw + aligned transcripts
     return c.json(responsePayload);

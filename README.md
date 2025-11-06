@@ -38,6 +38,31 @@ Client → Hono API → ffmpeg (preprocess) → spawn diarize.py + transcribe.py
 - Python 3.10+
 - ffmpeg
 - uv (for Python package management - https://docs.astral.sh/uv/)
+- **Hugging Face account** (free) for pyannote model access
+
+### Setup Hugging Face Token (Required)
+
+Pyannote speaker diarization requires a **free** Hugging Face account:
+
+1. **Create free account**: https://huggingface.co/join
+
+2. **Accept model licenses** (one-time) - **BOTH required**:
+   - Primary pipeline: https://huggingface.co/pyannote/speaker-diarization-3.1
+   - Segmentation model: https://huggingface.co/pyannote/segmentation-3.0
+   - Click "Agree and access repository" on BOTH pages
+   - ⚠️ **Missing the segmentation license causes**: `'NoneType' object has no attribute 'eval'` error
+
+3. **Create access token**: https://huggingface.co/settings/tokens
+   - Click "New token" → "Read" access is sufficient
+
+4. **Create `.env` file**:
+   ```bash
+   cp .env.example .env
+   # Then edit .env and add your token:
+   # HF_TOKEN=your_token_here
+   ```
+
+**Note**: This is 100% FREE - no paid tier required, just authentication to track license acceptance.
 
 ### Local Development
 
@@ -56,6 +81,10 @@ uv pip install -r requirements.txt
 # Install Bun dependencies
 bun install
 
+# Create .env file with your HF token
+cp .env.example .env
+# Edit .env and set HF_TOKEN=your_token_here
+
 # Run server
 bun run dev
 ```
@@ -63,7 +92,11 @@ bun run dev
 ### Docker (Recommended)
 
 ```bash
-# Build and run
+# Create .env file with your HF token (docker-compose will use it)
+cp .env.example .env
+# Edit .env and set HF_TOKEN=your_token_here
+
+# Build and run (docker-compose reads HF_TOKEN from .env)
 docker compose up --build
 
 # Server will be available at http://localhost:8000

@@ -1,8 +1,10 @@
-pyannote.audio==3.1.1
+pyannote.audio==3.3.2
 faster-whisper==1.0.3
 torch==2.4.0
 numpy==1.26.4
 soundfile==0.12.1
+requests==2.31.0
+huggingface-hub<1.0.0
 
 # System CLI Tools (install separately, not via pip)
 # yt-dlp: YouTube downloader CLI tool

@@ -8,6 +8,7 @@ Outputs JSON to stdout: {"segments": [{"start": ..., "end": ..., "speaker": ...,
 import sys
 import json
 import argparse
+import os
 # pyannote.audio: State-of-the-art speaker diarization using deep learning
 # Why: Free, CPU-compatible, pre-trained models with good accuracy on meeting audio
 from pyannote.audio import Pipeline
@@ -22,18 +23,52 @@ def main():
     parser.add_argument("--enable-overlap", type=str, default="true", help="Enable overlap detection")
     args = parser.parse_args()
 
+    # Get Hugging Face token from environment (required for pyannote model access)
+    # FREE: Requires free HF account + accepting model license at https://huggingface.co/pyannote/speaker-diarization-3.1
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        raise ValueError(
+            "HF_TOKEN environment variable not set. "
+            "Get a free token at https://huggingface.co/settings/tokens "
+            "and accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1"
+        )
+
+    # Progress tracking to stderr (doesn't interfere with stdout JSON)
+    print("[PROGRESS] Loading pyannote speaker-diarization-3.1 model...", file=sys.stderr, flush=True)
+
     # Load pre-trained pyannote pipeline (downloads model on first run, then caches)
     # Why v3.1: Latest stable version with improved accuracy over v2
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+    # Note: Newer huggingface_hub uses 'token' instead of 'use_auth_token'
+    try:
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
+    except TypeError:
+        # Fallback for older pyannote versions that use 'use_auth_token'
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token)
+    except Exception as e:
+        # Enhanced error message for common authentication issues
+        error_msg = str(e)
+        if "NoneType" in error_msg and "eval" in error_msg:
+            raise ValueError(
+                "Failed to load pyannote models. This usually means you haven't accepted the model licenses.\n"
+                "Please accept licenses for BOTH models using your HuggingFace account:\n"
+                "  1. https://huggingface.co/pyannote/speaker-diarization-3.1\n"
+                "  2. https://huggingface.co/pyannote/segmentation-3.0\n"
+                "After accepting, the same HF_TOKEN will work for both models."
+            ) from e
+        else:
+            raise
 
     # Configure diarization parameters based on input
-    # num_speakers helps when you know speaker count; otherwise auto-detects
-    diar_params = {"min_speaker_duration": args.min_speaker_duration}
+    # num_speakers: exact count (if known), or min_speakers/max_speakers for bounds
+    # Note: min_speaker_duration is NOT a pipeline parameter in pyannote 3.x
+    diar_params = {}
     if args.max_speakers:
-        diar_params["num_speakers"] = args.max_speakers
+        diar_params["max_speakers"] = args.max_speakers
 
+    print(f"[PROGRESS] Starting diarization on {args.wav_path}...", file=sys.stderr, flush=True)
     # Run diarization inference - CPU-only, returns Annotation object
     diar = pipeline(args.wav_path, **diar_params)
+    print("[PROGRESS] Diarization inference complete, processing segments...", file=sys.stderr, flush=True)
 
     # Convert pyannote Annotation to simple JSON format for TypeScript parsing
     # itertracks() yields (Segment, track_id, speaker_label) tuples

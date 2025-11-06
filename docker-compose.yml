@@ -8,6 +8,7 @@ services:
     environment:
       - ASR_MODEL=medium
       - PORT=8000
+      - HF_TOKEN=${HF_TOKEN}
     ports:
       - "8000:8000"
     volumes:

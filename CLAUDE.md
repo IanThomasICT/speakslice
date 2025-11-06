@@ -101,18 +101,32 @@ uv pip install -r requirements.txt
 # Install Bun dependencies
 bun install
 
-# Run server
+# Create .env file with HF token (required for pyannote)
+cp .env.example .env
+# Edit .env and set HF_TOKEN=your_token_here
+# IMPORTANT: Accept BOTH model licenses on HuggingFace:
+#   1. https://huggingface.co/pyannote/speaker-diarization-3.1
+#   2. https://huggingface.co/pyannote/segmentation-3.0
+
+# Run server (automatically loads .env)
 bun run dev
 ```
 
 ### Docker
 ```bash
-# Build and run (single container)
+# Create .env file with HF token (required)
+cp .env.example .env
+# Edit .env and set HF_TOKEN=your_token_here
+# IMPORTANT: Accept BOTH model licenses on HuggingFace:
+#   1. https://huggingface.co/pyannote/speaker-diarization-3.1
+#   2. https://huggingface.co/pyannote/segmentation-3.0
+
+# Build and run (docker-compose reads .env automatically)
 docker compose up --build
 
 # Or standalone
 docker build -t speakslice .
-docker run -p 8000:8000 -v $(pwd)/cache:/root/.cache speakslice
+docker run -p 8000:8000 -v $(pwd)/cache:/root/.cache -e HF_TOKEN=$HF_TOKEN speakslice
 ```
 
 ### Testing Endpoints

@@ -41,7 +41,15 @@ def main():
     words = []
     segments = []
 
+    # Progress tracking to stderr (doesn't interfere with stdout JSON)
+    print(f"[PROGRESS] Starting transcription with {args.model} model...", file=sys.stderr, flush=True)
+    segment_count = 0
+
     for seg in segments_iter:
+        segment_count += 1
+        # Log progress every 10 segments
+        if segment_count % 10 == 0:
+            print(f"[PROGRESS] Processed {segment_count} segments (current: {seg.start:.1f}s)", file=sys.stderr, flush=True)
         seg_words = []
         if seg.words:
             # Extract each word with timing and confidence (probability score)
@@ -66,6 +74,7 @@ def main():
 
     # Output JSON to stdout for TypeScript to parse
     # Why this format: Provides both granular (words) and readable (segments) data
+    print(f"[PROGRESS] Transcription complete: {segment_count} segments, {len(words)} words", file=sys.stderr, flush=True)
     output = {
         "words": words,
         "segments": segments,
