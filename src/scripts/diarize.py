@@ -9,9 +9,11 @@ import sys
 import json
 import argparse
 import os
+import time
 # pyannote.audio: State-of-the-art speaker diarization using deep learning
 # Why: Free, CPU-compatible, pre-trained models with good accuracy on meeting audio
 from pyannote.audio import Pipeline
+import torch
 
 
 def main():
@@ -39,6 +41,7 @@ def main():
     # Load pre-trained pyannote pipeline (downloads model on first run, then caches)
     # Why v3.1: Latest stable version with improved accuracy over v2
     # Note: Newer huggingface_hub uses 'token' instead of 'use_auth_token'
+    model_load_start = time.time()
     try:
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
     except TypeError:
@@ -58,6 +61,28 @@ def main():
         else:
             raise
 
+    # CPU optimization: Force CPU device and increase batch sizes
+    # Default batch sizes are GPU-optimized (~1-4) which is too small for CPU
+    # Larger batches (32) improve CPU throughput with minimal memory impact
+    pipeline.to(torch.device("cpu"))
+
+    # Increase batch sizes for segmentation and embedding models
+    # Note: These attributes may vary by pyannote version
+    if hasattr(pipeline, '_segmentation') and hasattr(pipeline._segmentation, 'model'):
+        # Segmentation model processes audio chunks to detect voice activity
+        original_seg_batch = getattr(pipeline._segmentation, 'batch_size', 1)
+        pipeline._segmentation.batch_size = 32
+        print(f"[PROGRESS] Segmentation batch size: {original_seg_batch} → 32", file=sys.stderr, flush=True)
+
+    if hasattr(pipeline, '_embedding') and hasattr(pipeline._embedding, 'model'):
+        # Embedding model extracts speaker voice characteristics
+        original_emb_batch = getattr(pipeline._embedding, 'batch_size', 1)
+        pipeline._embedding.batch_size = 32
+        print(f"[PROGRESS] Embedding batch size: {original_emb_batch} → 32", file=sys.stderr, flush=True)
+
+    model_load_time = time.time() - model_load_start
+    print(f"[TIMING] Model load: {model_load_time:.2f}s", file=sys.stderr, flush=True)
+
     # Configure diarization parameters based on input
     # num_speakers: exact count (if known), or min_speakers/max_speakers for bounds
     # Note: min_speaker_duration is NOT a pipeline parameter in pyannote 3.x
@@ -67,8 +92,11 @@ def main():
 
     print(f"[PROGRESS] Starting diarization on {args.wav_path}...", file=sys.stderr, flush=True)
     # Run diarization inference - CPU-only, returns Annotation object
+    inference_start = time.time()
     diar = pipeline(args.wav_path, **diar_params)
+    inference_time = time.time() - inference_start
     print("[PROGRESS] Diarization inference complete, processing segments...", file=sys.stderr, flush=True)
+    print(f"[TIMING] Inference: {inference_time:.2f}s", file=sys.stderr, flush=True)
 
     # Convert pyannote Annotation to simple JSON format for TypeScript parsing
     # itertracks() yields (Segment, track_id, speaker_label) tuples
@@ -83,6 +111,8 @@ def main():
 
     # Sort chronologically for consistent output order
     segments.sort(key=lambda x: (x["start"], x["end"]))
+
+    print(f"[TIMING] Total: {model_load_time + inference_time:.2f}s", file=sys.stderr, flush=True)
 
     # Output JSON to stdout (TypeScript reads this via spawn's stdout pipe)
     # Why stdout: Simple, language-agnostic IPC; no network overhead

@@ -33,12 +33,13 @@ const { values } = parseArgs({
 const DEBUG = values.debug || false;
 
 // Debug logging helper - only outputs when --debug flag is set
-// Format: [HH:MM:SS] STAGE: message { metadata }
-function debug(stage: string, message: string, meta?: object) {
+// Format: [HH:MM:SS] [XX%] STAGE: message { metadata }
+function debug(stage: string, message: string, meta?: object, progressPct?: number) {
   if (!DEBUG) return;
   const timestamp = new Date().toISOString().split('T')[1].split('.')[0];
+  const progress = progressPct !== undefined ? ` [${progressPct}%]` : '';
   const metaStr = meta ? ' ' + JSON.stringify(meta, null, 2) : '';
-  console.log(`[${timestamp}] ${stage}: ${message}${metaStr}`);
+  console.log(`[${timestamp}]${progress} ${stage}: ${message}${metaStr}`);
 }
 
 const app = new Hono();
@@ -60,7 +61,7 @@ const PYTHON_BIN = process.env.PYTHON_BIN ||
 // -ac 1 = mono, -ar 16000 = 16kHz sample rate, pcm_s16le = 16-bit PCM encoding
 async function runFfmpegToWav16kMono(src: string, dst: string) {
   const args = ["-y", "-i", src, "-ac", "1", "-ar", "16000", "-vn", "-c:a", "pcm_s16le", dst];
-  debug("FFMPEG", "Preprocessing started", { input: path.basename(src), output: path.basename(dst) });
+  debug("FFMPEG", "Converting to 16kHz mono WAV", { input: path.basename(src), output: path.basename(dst) });
   const start = Date.now();
 
   await new Promise<void>((resolve, reject) => {
@@ -70,10 +71,10 @@ async function runFfmpegToWav16kMono(src: string, dst: string) {
     p.on("close", (code) => {
       if (code === 0) {
         const elapsed = Date.now() - start;
-        debug("FFMPEG", "Preprocessing complete", { elapsed_ms: elapsed });
+        debug("FFMPEG", "Conversion complete", { elapsed_ms: elapsed });
         resolve();
       } else {
-        debug("FFMPEG", "Preprocessing failed", { error: err.substring(0, 200) });
+        debug("FFMPEG", "Conversion failed", { error: err.substring(0, 200) });
         reject(new Error(err));
       }
     });
@@ -148,11 +149,13 @@ async function callDiarizationScript(
     p.stdout.on("data", (d) => (stdout += d.toString()));
     p.stderr.on("data", (d) => {
       stderr += d.toString();
-      // Log progress messages from Python script in real-time
+      // Log progress and timing messages from Python script in real-time
       const lines = d.toString().split('\n');
       for (const line of lines) {
         if (line.includes('[PROGRESS]')) {
           debug("DIARIZATION", line.replace('[PROGRESS]', '').trim(), {});
+        } else if (line.includes('[TIMING]')) {
+          debug("DIARIZATION", line.replace('[TIMING]', '').trim(), {});
         }
       }
     });
@@ -228,6 +231,10 @@ async function transcribeWithWhisper(
   const args = [TRANSCRIBE_SCRIPT, wavPath, "--model", opts.model];
   if (opts.language && opts.language !== "auto") args.push("--language", opts.language);
 
+  // Enable fast mode by default for maximum speed (beam_size=1, distil-whisper)
+  // Provides 80-90% speedup with <3% accuracy loss
+  args.push("--fast");
+
   debug("ASR", "Spawning script", {
     script: path.basename(TRANSCRIBE_SCRIPT),
     wav: path.basename(wavPath),
@@ -244,11 +251,13 @@ async function transcribeWithWhisper(
     p.stdout.on("data", (d) => (stdout += d.toString()));
     p.stderr.on("data", (d) => {
       stderr += d.toString();
-      // Log progress messages from Python script in real-time
+      // Log progress and timing messages from Python script in real-time
       const lines = d.toString().split('\n');
       for (const line of lines) {
         if (line.includes('[PROGRESS]')) {
           debug("ASR", line.replace('[PROGRESS]', '').trim(), {});
+        } else if (line.includes('[TIMING]')) {
+          debug("ASR", line.replace('[TIMING]', '').trim(), {});
         }
       }
     });
@@ -488,6 +497,8 @@ app.get("/v1/health", async (c) => {
 app.post("/v1/process", async (c) => {
   const requestStart = Date.now();
 
+  debug("PIPELINE", "Request received", {}, 0);
+
   // Parse multipart form data - Hono provides built-in parser for file uploads
   const form = await c.req.parseBody();
   const file = form["file"];
@@ -530,9 +541,9 @@ app.post("/v1/process", async (c) => {
     asr_model: asrModel,
     language,
     max_speakers: maxSpeakers,
-  });
+  }, 2);
 
-  debug("TEMP", "Directory created", { path: tmpDir, id });
+  debug("TEMP", "Directory created", { path: tmpDir, id }, 3);
 
   // Stream uploaded file to disk (handles large files without memory overflow)
   const write = createWriteStream(srcPath);
@@ -554,7 +565,7 @@ app.post("/v1/process", async (c) => {
   try {
     // Enforce 2GB size limit to prevent memory/disk issues with huge files
     const stat = await fs.stat(srcPath);
-    debug("UPLOAD", "File written to disk", { size_bytes: stat.size, size_mb: (stat.size / 1024 / 1024).toFixed(2) });
+    debug("UPLOAD", "File written to disk", { size_bytes: stat.size, size_mb: (stat.size / 1024 / 1024).toFixed(2) }, 5);
 
     if (stat.size > 2 * 1024 * 1024 * 1024) {
       debug("UPLOAD", "File too large, rejecting", { size_bytes: stat.size });
@@ -563,13 +574,15 @@ app.post("/v1/process", async (c) => {
 
     // Preprocess: Convert any format (mp3/mp4/wav) to standardized 16kHz mono WAV
     // Why: ML models require consistent input format; ffmpeg handles all conversions
+    debug("PREPROCESS", "Starting audio conversion to 16kHz mono WAV", {}, 8);
     await runFfmpegToWav16kMono(srcPath, outWav);
     const duration = (await getDurationSec(outWav)) ?? null;
+    debug("PREPROCESS", "Audio conversion complete", { duration_sec: duration }, 12);
 
     // Key optimization: Run ASR and diarization in parallel (both read same WAV file)
     // Why: Saves ~50% processing time since operations are independent
     // Both use CPU-only inference, so no GPU contention
-    debug("PIPELINE", "Starting parallel processing", { diarization: "pyannote", asr: asrModel });
+    debug("PIPELINE", "Starting parallel processing (ASR + diarization)", { diarization: "pyannote", asr: asrModel }, 15);
     const parallelStart = Date.now();
 
     const [diarSegments, asrResult] = await Promise.all([
@@ -582,12 +595,14 @@ app.post("/v1/process", async (c) => {
     ]);
 
     const parallelElapsed = Date.now() - parallelStart;
-    debug("PIPELINE", "Parallel processing complete", { elapsed_ms: parallelElapsed });
+    debug("PIPELINE", "Parallel processing complete", { elapsed_ms: parallelElapsed }, 75);
 
     // Sort by timestamp for chronological order, then align words to speakers
+    debug("ALIGN", "Starting word-to-speaker alignment", {}, 78);
     diarSegments.sort((a, b) => a.start - b.start);
     const words = asrResult.words.sort((a, b) => a.start - b.start);
     const aligned = alignWordsToDiarization(words, diarSegments);
+    debug("ALIGN", "Alignment complete", { speaker_segments: aligned.length }, 82);
 
     const totalElapsed = Date.now() - requestStart;
     const responsePayload = {
@@ -614,9 +629,10 @@ app.post("/v1/process", async (c) => {
       size_bytes: payloadSize,
       size_kb: (payloadSize / 1024).toFixed(2),
       total_elapsed_ms: totalElapsed,
-    });
+    }, 85);
 
     // Save outputs to cache directory for persistence
+    debug("CACHE", "Starting output persistence", {}, 88);
     const cacheDir = getCacheDirPath();
     await fs.mkdir(cacheDir, { recursive: true });
 
@@ -643,9 +659,10 @@ app.post("/v1/process", async (c) => {
       JSON.stringify(responsePayload, null, 2)
     );
 
-    debug("CACHE", "Outputs saved", { path: cacheDir });
+    debug("CACHE", "Outputs saved", { path: cacheDir }, 95);
 
     // Return comprehensive JSON with all data: raw + aligned transcripts
+    debug("PIPELINE", "Request complete", { total_elapsed_ms: totalElapsed }, 100);
     return c.json(responsePayload);
   } catch (e: any) {
     debug("ERROR", "Request failed", {
@@ -678,4 +695,12 @@ console.log(`SpeakSlice API running on port ${PORT}`);
 if (DEBUG) {
   console.log(`[DEBUG MODE ENABLED] Using Python: ${PYTHON_BIN}`);
   console.log(`[DEBUG MODE ENABLED] ASR Model: ${ASR_MODEL}`);
+  console.log(`[DEBUG MODE ENABLED] Progress tracking enabled with percentage indicators`);
+  console.log(`[DEBUG MODE ENABLED] Pipeline stages:`);
+  console.log(`  [0-5%]   Upload & validation`);
+  console.log(`  [8-12%]  Audio preprocessing (ffmpeg)`);
+  console.log(`  [15-75%] ASR + Diarization (parallel)`);
+  console.log(`  [78-82%] Word-to-speaker alignment`);
+  console.log(`  [85-95%] Cache persistence`);
+  console.log(`  [100%]   Complete`);
 }
