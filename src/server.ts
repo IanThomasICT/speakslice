@@ -403,6 +403,12 @@ app.get("/app", (c) => {
                 <span id="totalTime">0:00</span>
               </div>
             </div>
+            <select id="playbackSpeed" class="px-2 py-1.5 bg-gray-100 text-gray-700 rounded text-xs font-medium hover:bg-gray-200 cursor-pointer border border-gray-300 flex-shrink-0">
+              <option value="1">1x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+              <option value="2">2x</option>
+            </select>
             <button id="saveNamesBtn" class="hidden px-3 py-2 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 cursor-pointer flex-shrink-0 flex items-center gap-1.5">
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
               <span>Save</span>
@@ -622,8 +628,21 @@ app.get("/app", (c) => {
         const div = document.createElement('div');
         const colors = SPEAKER_COLORS[seg.speaker] || SPEAKER_COLORS['SPEAKER_00'];
 
-        div.className = 'transcript-segment pl-3 py-2 border-l-2 transition-colors';
+        div.className = 'transcript-segment pl-3 py-2 border-l-2 transition-all duration-200 cursor-pointer hover:border-l-4 hover:bg-opacity-30';
         div.style.borderColor = colors.border;
+        div.setAttribute('data-segment-idx', idx);
+        div.setAttribute('data-start-time', seg.start);
+
+        // Add hover background color
+        div.addEventListener('mouseenter', () => {
+          div.style.backgroundColor = colors.bg;
+        });
+        div.addEventListener('mouseleave', () => {
+          // Only remove background if not currently active
+          if (!div.classList.contains('bg-blue-50')) {
+            div.style.backgroundColor = '';
+          }
+        });
 
         const displayName = speakerNames[seg.speaker] || seg.speaker;
 
@@ -646,6 +665,7 @@ app.get("/app", (c) => {
       // Add double-click listeners for renaming
       document.querySelectorAll('.speaker-name').forEach(el => {
         el.addEventListener('dblclick', (e) => {
+          e.stopPropagation(); // Prevent segment click when double-clicking speaker name
           const speaker = e.target.getAttribute('data-speaker');
           const currentName = speakerNames[speaker] || speaker;
           const newName = prompt(\`Rename \${currentName}:\`, currentName);
@@ -658,6 +678,25 @@ app.get("/app", (c) => {
             });
             // Show save button
             document.getElementById('saveNamesBtn').classList.remove('hidden');
+          }
+        });
+      });
+
+      // Add click listeners to segments for audio seeking
+      document.querySelectorAll('.transcript-segment').forEach(el => {
+        el.addEventListener('click', (e) => {
+          // Don't seek if clicking on speaker name (for renaming)
+          if (e.target.classList.contains('speaker-name')) return;
+
+          const startTime = parseFloat(el.getAttribute('data-start-time'));
+          if (audioElement && isAudioLoaded && !isNaN(startTime)) {
+            audioElement.currentTime = startTime;
+            // Auto-play if not already playing
+            if (audioElement.paused) {
+              audioElement.play();
+              const playIcon = document.getElementById('playIcon');
+              playIcon.innerHTML = '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>';
+            }
           }
         });
       });
@@ -782,6 +821,12 @@ app.get("/app", (c) => {
     document.getElementById('audioSeeker').addEventListener('input', (e) => {
       if (!audioElement || !isAudioLoaded) return;
       audioElement.currentTime = e.target.value;
+    });
+
+    // Playback speed control
+    document.getElementById('playbackSpeed').addEventListener('change', (e) => {
+      if (!audioElement || !isAudioLoaded) return;
+      audioElement.playbackRate = parseFloat(e.target.value);
     });
 
     // Save speaker names
