@@ -303,93 +303,171 @@ app.get("/app", (c) => {
   <title>SpeakSlice - Audio Diarization & Transcription</title>
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 </head>
-<body class="bg-gray-50 min-h-screen p-8">
-  <div class="max-w-4xl mx-auto">
-    <header class="mb-8">
-      <h1 class="text-3xl font-bold text-gray-900 mb-2">SpeakSlice</h1>
-      <p class="text-gray-600">Free, CPU-first speaker diarization and transcription</p>
-    </header>
+<body class="bg-gray-50 min-h-screen">
+  <!-- Header as aside in top-left -->
+  <aside class="fixed top-4 left-4 z-10">
+    <h1 class="text-lg font-bold text-gray-900">SpeakSlice</h1>
+    <p class="text-xs text-gray-500">Free, CPU-first diarization</p>
+  </aside>
 
-    <div class="bg-white rounded-lg shadow p-6 mb-6">
-      <h2 class="text-xl font-semibold mb-4">Upload Audio</h2>
+  <div class="max-w-5xl mx-auto pt-20 px-4">
+    <!-- Tab Navigation at top -->
+    <div class="flex justify-center space-x-6 mb-8 border-b border-gray-200">
+      <button id="uploadTab" class="px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer">
+        Upload
+      </button>
+      <button id="collectionsTab" class="px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer">
+        Collections
+      </button>
+    </div>
 
-      <form id="uploadForm" class="space-y-4">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Audio File (MP3/MP4/WAV)</label>
+    <!-- Upload Tab Content -->
+    <div id="uploadContent">
+      <div class="max-w-xl mx-auto mb-8">
+        <form id="uploadForm" class="space-y-3">
           <input type="file" id="audioFile" accept="audio/*,video/*" required
-            class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
-        </div>
+            class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
 
-        <div class="grid grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">ASR Model</label>
-            <select id="asrModel" class="block w-full rounded border-gray-300 shadow-sm">
-              <option value="tiny">Tiny (fastest)</option>
-              <option value="base">Base</option>
-              <option value="small">Small</option>
-              <option value="medium" selected>Medium (default)</option>
-            </select>
+          <details class="text-xs">
+            <summary class="text-gray-500 hover:text-gray-700 cursor-pointer">Options</summary>
+            <div class="mt-2 space-y-2 pl-3 border-l border-gray-200">
+              <select id="asrModel" class="block w-full rounded border-gray-300 text-xs">
+                <option value="tiny">Tiny</option>
+                <option value="base">Base</option>
+                <option value="small">Small</option>
+                <option value="medium" selected>Medium</option>
+              </select>
+              <select id="language" class="block w-full rounded border-gray-300 text-xs">
+                <option value="auto">Auto-detect</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="zh">Chinese</option>
+              </select>
+              <input type="number" id="maxSpeakers" min="1" max="10" placeholder="Max speakers"
+                class="block w-full rounded border-gray-300 text-xs">
+            </div>
+          </details>
+
+          <button type="submit" id="submitBtn"
+            class="w-full bg-blue-600 text-white py-2 px-4 rounded text-sm font-medium hover:bg-blue-700 cursor-pointer disabled:bg-gray-400 disabled:cursor-not-allowed">
+            Process
+          </button>
+        </form>
+
+        <div id="progress" class="hidden mt-4 text-center">
+          <div class="inline-flex items-center space-x-2 text-sm text-gray-600">
+            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <span>Processing...</span>
           </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-2">Language</label>
-            <select id="language" class="block w-full rounded border-gray-300 shadow-sm">
-              <option value="auto">Auto-detect</option>
-              <option value="en">English</option>
-              <option value="es">Spanish</option>
-              <option value="fr">French</option>
-              <option value="de">German</option>
-              <option value="zh">Chinese</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label class="block text-sm font-medium text-gray-700 mb-2">Max Speakers (optional)</label>
-          <input type="number" id="maxSpeakers" min="1" max="10" placeholder="Auto-detect"
-            class="block w-full rounded border-gray-300 shadow-sm">
-        </div>
-
-        <button type="submit" id="submitBtn"
-          class="w-full bg-blue-600 text-white py-2 px-4 rounded font-medium hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed">
-          Process Audio
-        </button>
-      </form>
-
-      <div id="progress" class="hidden mt-4">
-        <div class="flex items-center space-x-2">
-          <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
-          <span class="text-gray-600">Processing... (this may take a minute)</span>
         </div>
       </div>
     </div>
 
-    <div id="results" class="hidden bg-white rounded-lg shadow p-6">
-      <h2 class="text-xl font-semibold mb-4">Results</h2>
-
-      <div class="mb-4 p-3 bg-gray-50 rounded">
-        <div class="grid grid-cols-3 gap-4 text-sm">
-          <div><span class="font-medium">Duration:</span> <span id="duration">-</span>s</div>
-          <div><span class="font-medium">Language:</span> <span id="detectedLang">-</span></div>
-          <div><span class="font-medium">Speakers:</span> <span id="speakerCount">-</span></div>
+    <!-- Collections Tab Content -->
+    <div id="collectionsContent" class="hidden">
+      <div class="mb-8">
+        <div id="collectionsGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 max-w-4xl mx-auto"></div>
+        <div id="collectionsEmpty" class="hidden text-center py-12 text-sm text-gray-400">
+          No files yet
         </div>
       </div>
-
-      <h3 class="text-lg font-semibold mb-3">Speaker Transcript</h3>
-      <div id="transcript" class="space-y-3 mb-6"></div>
-
-      <details class="mt-6">
-        <summary class="cursor-pointer text-sm font-medium text-gray-700 hover:text-gray-900">
-          Show Raw JSON Response
-        </summary>
-        <pre id="rawJson" class="mt-2 p-4 bg-gray-50 rounded text-xs overflow-x-auto"></pre>
-      </details>
     </div>
 
-    <div id="error" class="hidden bg-red-50 border border-red-200 rounded-lg p-4 text-red-800"></div>
+    <!-- Results Display (shared) -->
+    <div id="results" class="hidden">
+      <div class="max-w-4xl mx-auto">
+        <div class="flex justify-between items-center mb-6">
+          <div class="flex items-baseline gap-6 text-xs text-gray-500">
+            <div><span id="duration">-</span>s</div>
+            <div><span id="detectedLang">-</span></div>
+            <div><span id="speakerCount">-</span> speakers</div>
+          </div>
+          <button id="saveNamesBtn" class="hidden px-3 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 cursor-pointer">
+            Save
+          </button>
+        </div>
+
+        <!-- Audio Player -->
+        <div id="audioPlayer" class="hidden mb-6">
+          <div class="flex items-center gap-3 p-3 bg-gray-50 rounded">
+            <button id="playBtn" class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center cursor-pointer hover:bg-blue-700 flex-shrink-0">
+              <span id="playIcon">▶</span>
+            </button>
+            <div class="flex-1">
+              <input type="range" id="audioSeeker" min="0" max="100" value="0" step="0.01"
+                class="w-full cursor-pointer">
+              <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span id="currentTime">0:00</span>
+                <span id="totalTime">0:00</span>
+              </div>
+            </div>
+            <div id="audioLoading" class="hidden flex-shrink-0">
+              <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+            </div>
+          </div>
+          <audio id="audioElement" class="hidden"></audio>
+        </div>
+
+        <p class="text-xs text-gray-400 mb-4">Double-click speaker name to rename</p>
+        <div id="transcript" class="space-y-4"></div>
+
+        <details class="mt-8">
+          <summary class="text-xs text-gray-400 hover:text-gray-600 cursor-pointer">Raw JSON</summary>
+          <pre id="rawJson" class="mt-2 p-3 bg-gray-50 rounded text-xs overflow-x-auto"></pre>
+        </details>
+      </div>
+    </div>
+
+    <div id="error" class="hidden bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-800 max-w-2xl mx-auto"></div>
   </div>
 
   <script>
+    // Speaker color palette (consistent mapping)
+    const SPEAKER_COLORS = {
+      'SPEAKER_00': { border: 'rgb(59, 130, 246)', bg: 'rgb(239, 246, 255)', text: 'rgb(29, 78, 216)' }, // blue
+      'SPEAKER_01': { border: 'rgb(249, 115, 22)', bg: 'rgb(255, 247, 237)', text: 'rgb(194, 65, 12)' }, // orange
+      'SPEAKER_02': { border: 'rgb(34, 197, 94)', bg: 'rgb(240, 253, 244)', text: 'rgb(21, 128, 61)' }, // green
+      'SPEAKER_03': { border: 'rgb(234, 179, 8)', bg: 'rgb(254, 252, 232)', text: 'rgb(161, 98, 7)' }, // yellow
+      'SPEAKER_04': { border: 'rgb(168, 85, 247)', bg: 'rgb(250, 245, 255)', text: 'rgb(107, 33, 168)' }, // purple
+      'SPEAKER_05': { border: 'rgb(236, 72, 153)', bg: 'rgb(253, 242, 248)', text: 'rgb(157, 23, 77)' }, // pink
+      'SPEAKER_06': { border: 'rgb(99, 102, 241)', bg: 'rgb(238, 242, 255)', text: 'rgb(67, 56, 202)' }, // indigo
+      'SPEAKER_07': { border: 'rgb(6, 182, 212)', bg: 'rgb(236, 254, 255)', text: 'rgb(14, 116, 144)' }, // cyan
+      'SPEAKER_08': { border: 'rgb(132, 204, 22)', bg: 'rgb(247, 254, 231)', text: 'rgb(77, 124, 15)' }, // lime
+      'SPEAKER_09': { border: 'rgb(244, 63, 94)', bg: 'rgb(255, 241, 242)', text: 'rgb(159, 18, 57)' }, // rose
+    };
+
+    // Global state
+    let currentData = null;
+    let currentCollectionId = null;
+    let speakerNames = {};
+    let audioElement = null;
+    let isAudioLoaded = false;
+    let currentSegmentIndex = -1;
+
+    // Tab switching
+    const uploadTab = document.getElementById('uploadTab');
+    const collectionsTab = document.getElementById('collectionsTab');
+    const uploadContent = document.getElementById('uploadContent');
+    const collectionsContent = document.getElementById('collectionsContent');
+
+    uploadTab.addEventListener('click', () => {
+      uploadTab.className = 'px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer';
+      collectionsTab.className = 'px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer';
+      uploadContent.classList.remove('hidden');
+      collectionsContent.classList.add('hidden');
+    });
+
+    collectionsTab.addEventListener('click', () => {
+      collectionsTab.className = 'px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer';
+      uploadTab.className = 'px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer';
+      collectionsContent.classList.remove('hidden');
+      uploadContent.classList.add('hidden');
+      loadCollections();
+    });
+
+    // Upload form handling
     const form = document.getElementById('uploadForm');
     const progress = document.getElementById('progress');
     const results = document.getElementById('results');
@@ -399,7 +477,6 @@ app.get("/app", (c) => {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
 
-      // Reset UI
       progress.classList.remove('hidden');
       results.classList.add('hidden');
       error.classList.add('hidden');
@@ -425,8 +502,7 @@ app.get("/app", (c) => {
           throw new Error(data.error || 'Processing failed');
         }
 
-        // Display results
-        displayResults(data);
+        displayResults(data, null);
 
       } catch (err) {
         error.textContent = 'Error: ' + err.message;
@@ -437,36 +513,277 @@ app.get("/app", (c) => {
       }
     });
 
-    function displayResults(data) {
+    // Load collections
+    async function loadCollections() {
+      try {
+        const response = await fetch('/v1/collections');
+        const data = await response.json();
+
+        const grid = document.getElementById('collectionsGrid');
+        const empty = document.getElementById('collectionsEmpty');
+
+        if (!data.collections || data.collections.length === 0) {
+          grid.innerHTML = '';
+          empty.classList.remove('hidden');
+          return;
+        }
+
+        empty.classList.add('hidden');
+        grid.innerHTML = '';
+
+        data.collections.forEach(col => {
+          const card = document.createElement('div');
+          card.className = 'border border-gray-200 rounded p-3 hover:border-blue-400 hover:shadow-sm transition cursor-pointer';
+
+          const date = new Date(col.processed_date);
+          const dateStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+          card.innerHTML = \`
+            <h3 class="text-sm font-medium text-gray-900 mb-1 truncate">\${col.filename}</h3>
+            <div class="text-xs text-gray-500 space-y-0.5">
+              <div>\${dateStr}</div>
+              <div>\${col.duration_sec?.toFixed(0) || '?'}s · \${col.speaker_count} spk</div>
+            </div>
+          \`;
+
+          card.addEventListener('click', () => loadCollection(col.id));
+          grid.appendChild(card);
+        });
+      } catch (err) {
+        error.textContent = 'Error loading collections: ' + err.message;
+        error.classList.remove('hidden');
+      }
+    }
+
+    // Load specific collection
+    async function loadCollection(id) {
+      try {
+        const response = await fetch(\`/v1/collections/\${id}\`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to load collection');
+        }
+
+        currentCollectionId = id;
+        displayResults(data, id);
+      } catch (err) {
+        error.textContent = 'Error loading collection: ' + err.message;
+        error.classList.remove('hidden');
+      }
+    }
+
+    // Display results with speaker colors and renaming
+    function displayResults(data, collectionId) {
+      currentData = data;
+      currentCollectionId = collectionId;
+      speakerNames = data.speaker_names || {};
+
       // Metadata
-      document.getElementById('duration').textContent = data.duration_sec?.toFixed(1) || 'N/A';
-      document.getElementById('detectedLang').textContent = data.asr?.language || 'N/A';
+      document.getElementById('duration').textContent = data.duration_sec?.toFixed(0) || '?';
+      document.getElementById('detectedLang').textContent = data.asr?.language || '?';
 
       const speakers = new Set(data.aligned.speaker_segments.map(s => s.speaker));
       document.getElementById('speakerCount').textContent = speakers.size;
 
-      // Transcript
+      // Transcript with colors and editable names
       const transcript = document.getElementById('transcript');
       transcript.innerHTML = '';
 
-      data.aligned.speaker_segments.forEach(seg => {
+      data.aligned.speaker_segments.forEach((seg, idx) => {
         const div = document.createElement('div');
-        div.className = 'border-l-4 border-blue-500 pl-4 py-2';
+        const colors = SPEAKER_COLORS[seg.speaker] || SPEAKER_COLORS['SPEAKER_00'];
+
+        div.className = 'transcript-segment pl-3 py-2 border-l-2 transition-colors';
+        div.style.borderColor = colors.border;
+
+        const displayName = speakerNames[seg.speaker] || seg.speaker;
+
         div.innerHTML = \`
-          <div class="flex items-baseline space-x-2 mb-1">
-            <span class="font-semibold text-blue-700">\${seg.speaker}</span>
-            <span class="text-xs text-gray-500">\${seg.start.toFixed(1)}s - \${seg.end.toFixed(1)}s</span>
+          <div class="flex items-baseline gap-2 mb-1">
+            <span class="text-xs font-semibold speaker-name hover:underline cursor-pointer"
+                  style="color: \${colors.text}; background-color: \${colors.bg}; padding: 1px 6px; border-radius: 3px;"
+                  data-speaker="\${seg.speaker}"
+                  data-idx="\${idx}">
+              \${displayName}
+            </span>
+            <span class="text-xs text-gray-400">\${seg.start.toFixed(1)}s</span>
           </div>
-          <p class="text-gray-900">\${seg.text || '(silence)'}</p>
+          <p class="text-sm text-gray-800 leading-relaxed">\${seg.text || '(silence)'}</p>
         \`;
+
         transcript.appendChild(div);
+      });
+
+      // Add double-click listeners for renaming
+      document.querySelectorAll('.speaker-name').forEach(el => {
+        el.addEventListener('dblclick', (e) => {
+          const speaker = e.target.getAttribute('data-speaker');
+          const currentName = speakerNames[speaker] || speaker;
+          const newName = prompt(\`Rename \${currentName}:\`, currentName);
+
+          if (newName && newName.trim() && newName !== currentName) {
+            speakerNames[speaker] = newName.trim();
+            // Update all occurrences in UI
+            document.querySelectorAll(\`[data-speaker="\${speaker}"]\`).forEach(span => {
+              span.textContent = newName.trim();
+            });
+            // Show save button
+            document.getElementById('saveNamesBtn').classList.remove('hidden');
+          }
+        });
       });
 
       // Raw JSON
       document.getElementById('rawJson').textContent = JSON.stringify(data, null, 2);
 
       results.classList.remove('hidden');
+
+      // Show save button if viewing a collection
+      if (collectionId) {
+        document.getElementById('saveNamesBtn').classList.remove('hidden');
+      } else {
+        document.getElementById('saveNamesBtn').classList.add('hidden');
+      }
+
+      // Load audio if viewing a collection
+      if (collectionId) {
+        loadAudio(collectionId);
+      }
     }
+
+    // Format time in MM:SS format
+    function formatTime(seconds) {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return \`\${mins}:\${secs.toString().padStart(2, '0')}\`;
+    }
+
+    // Load audio file for playback
+    async function loadAudio(collectionId) {
+      if (!collectionId) return;
+
+      const loading = document.getElementById('audioLoading');
+      loading.classList.remove('hidden');
+
+      try {
+        const response = await fetch(\`/v1/collections/\${collectionId}/audio\`);
+        if (!response.ok) throw new Error('Audio not found');
+
+        const blob = await response.blob();
+        const audioUrl = URL.createObjectURL(blob);
+
+        audioElement = document.getElementById('audioElement');
+        audioElement.src = audioUrl;
+        audioElement.load();
+
+        audioElement.addEventListener('loadedmetadata', () => {
+          const seeker = document.getElementById('audioSeeker');
+          seeker.max = audioElement.duration;
+          document.getElementById('totalTime').textContent = formatTime(audioElement.duration);
+          document.getElementById('audioPlayer').classList.remove('hidden');
+          isAudioLoaded = true;
+          loading.classList.add('hidden');
+        });
+
+        // Update UI during playback
+        audioElement.addEventListener('timeupdate', handleTimeUpdate);
+      } catch (err) {
+        loading.classList.add('hidden');
+        console.error('Failed to load audio:', err);
+      }
+    }
+
+    // Handle audio time updates and auto-scroll
+    function handleTimeUpdate() {
+      const currentTime = audioElement.currentTime;
+
+      // Update seeker and time display
+      document.getElementById('audioSeeker').value = currentTime;
+      document.getElementById('currentTime').textContent = formatTime(currentTime);
+
+      // Find current segment based on audio time
+      const segments = currentData.aligned.speaker_segments;
+      let foundIndex = -1;
+
+      for (let i = 0; i < segments.length; i++) {
+        if (currentTime >= segments[i].start && currentTime < segments[i].end) {
+          foundIndex = i;
+          break;
+        }
+      }
+
+      // Highlight and scroll to current segment
+      if (foundIndex !== currentSegmentIndex && foundIndex !== -1) {
+        currentSegmentIndex = foundIndex;
+
+        // Remove previous highlight
+        document.querySelectorAll('.transcript-segment').forEach(el => {
+          el.classList.remove('bg-blue-50', 'bg-opacity-50');
+        });
+
+        // Add highlight to current segment
+        const currentSegment = document.querySelectorAll('.transcript-segment')[foundIndex];
+        if (currentSegment) {
+          currentSegment.classList.add('bg-blue-50', 'bg-opacity-50');
+          currentSegment.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    }
+
+    // Play/Pause button
+    document.getElementById('playBtn').addEventListener('click', () => {
+      if (!audioElement || !isAudioLoaded) return;
+
+      if (audioElement.paused) {
+        audioElement.play();
+        document.getElementById('playIcon').textContent = '⏸';
+      } else {
+        audioElement.pause();
+        document.getElementById('playIcon').textContent = '▶';
+      }
+    });
+
+    // Audio seeker control
+    document.getElementById('audioSeeker').addEventListener('input', (e) => {
+      if (!audioElement || !isAudioLoaded) return;
+      audioElement.currentTime = e.target.value;
+    });
+
+    // Save speaker names
+    document.getElementById('saveNamesBtn').addEventListener('click', async () => {
+      if (!currentCollectionId) return;
+
+      try {
+        const response = await fetch(\`/v1/collections/\${currentCollectionId}/speaker-names\`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ speaker_names: speakerNames })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to save speaker names');
+        }
+
+        // Show success feedback
+        const btn = document.getElementById('saveNamesBtn');
+        btn.textContent = '✓';
+        btn.classList.remove('bg-green-600', 'hover:bg-green-700');
+        btn.classList.add('bg-gray-300');
+        setTimeout(() => {
+          btn.textContent = 'Save';
+          btn.classList.remove('bg-gray-300');
+          btn.classList.add('bg-green-600', 'hover:bg-green-700');
+          btn.classList.add('hidden');
+        }, 1500);
+
+      } catch (err) {
+        error.textContent = 'Error saving speaker names: ' + err.message;
+        error.classList.remove('hidden');
+      }
+    });
   </script>
 </body>
 </html>`);
@@ -658,6 +975,11 @@ app.post("/v1/process", async (c) => {
       path.join(cacheDir, "response.json"),
       JSON.stringify(responsePayload, null, 2)
     );
+    // Save preprocessed audio file for playback
+    await fs.copyFile(
+      outWav,
+      path.join(cacheDir, "audio.wav")
+    );
 
     debug("CACHE", "Outputs saved", { path: cacheDir }, 95);
 
@@ -679,6 +1001,148 @@ app.post("/v1/process", async (c) => {
     } catch (cleanupErr: any) {
       debug("CLEANUP", "Failed", { error: cleanupErr.message });
     }
+  }
+});
+
+// List all processed files in cache directory
+// Returns metadata for each cache folder: id, filename, date, duration, speakers
+app.get("/v1/collections", async (c) => {
+  const cacheDir = "cache";
+  try {
+    const entries = await fs.readdir(cacheDir, { withFileTypes: true });
+    const collections = [];
+
+    for (const entry of entries) {
+      // Only process directories matching YYYYMMDD-HHmm format
+      if (!entry.isDirectory() || !/^\d{8}-\d{4}$/.test(entry.name)) continue;
+
+      const responsePath = path.join(cacheDir, entry.name, "response.json");
+      try {
+        const content = await fs.readFile(responsePath, "utf-8");
+        const data = JSON.parse(content);
+
+        // Parse date from folder name (YYYYMMDD-HHmm)
+        const match = entry.name.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+        const processedDate = match
+          ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]))
+          : null;
+
+        const speakers = new Set(data.aligned?.speaker_segments?.map((s: any) => s.speaker) || []);
+
+        collections.push({
+          id: entry.name,
+          filename: data.file || "unknown",
+          processed_date: processedDate?.toISOString() || null,
+          duration_sec: data.duration_sec || null,
+          speaker_count: speakers.size,
+          language: data.asr?.language || null,
+        });
+      } catch (err) {
+        // Skip folders with missing or invalid response.json
+        debug("COLLECTIONS", "Skipping invalid cache folder", { folder: entry.name });
+        continue;
+      }
+    }
+
+    // Sort by date descending (newest first)
+    collections.sort((a, b) => {
+      const dateA = a.processed_date ? new Date(a.processed_date).getTime() : 0;
+      const dateB = b.processed_date ? new Date(b.processed_date).getTime() : 0;
+      return dateB - dateA;
+    });
+
+    return c.json({ collections });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Get full response.json for a specific collection
+app.get("/v1/collections/:id", async (c) => {
+  const id = c.req.param("id");
+
+  // Validate id format (prevent path traversal)
+  if (!/^\d{8}-\d{4}$/.test(id)) {
+    return c.json({ error: "Invalid collection ID format" }, 400);
+  }
+
+  const responsePath = path.join("cache", id, "response.json");
+
+  try {
+    const content = await fs.readFile(responsePath, "utf-8");
+    const data = JSON.parse(content);
+    return c.json(data);
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return c.json({ error: "Collection not found" }, 404);
+    }
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Get audio file for a specific collection
+app.get("/v1/collections/:id/audio", async (c) => {
+  const id = c.req.param("id");
+
+  // Validate id format (prevent path traversal)
+  if (!/^\d{8}-\d{4}$/.test(id)) {
+    return c.json({ error: "Invalid collection ID format" }, 400);
+  }
+
+  const audioPath = path.join("cache", id, "audio.wav");
+
+  try {
+    const audio = await fs.readFile(audioPath);
+    return c.body(audio, {
+      headers: {
+        "Content-Type": "audio/wav",
+        "Content-Length": audio.length.toString(),
+      },
+    });
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return c.json({ error: "Audio file not found" }, 404);
+    }
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// Update speaker names for a collection
+app.patch("/v1/collections/:id/speaker-names", async (c) => {
+  const id = c.req.param("id");
+
+  // Validate id format (prevent path traversal)
+  if (!/^\d{8}-\d{4}$/.test(id)) {
+    return c.json({ error: "Invalid collection ID format" }, 400);
+  }
+
+  const responsePath = path.join("cache", id, "response.json");
+
+  try {
+    // Read existing response.json
+    const content = await fs.readFile(responsePath, "utf-8");
+    const data = JSON.parse(content);
+
+    // Parse request body for speaker names
+    const body = await c.req.json();
+    if (!body.speaker_names || typeof body.speaker_names !== "object") {
+      return c.json({ error: "speaker_names object required" }, 400);
+    }
+
+    // Update speaker_names field
+    data.speaker_names = body.speaker_names;
+
+    // Write back to file
+    await fs.writeFile(responsePath, JSON.stringify(data, null, 2));
+
+    debug("COLLECTIONS", "Speaker names updated", { id, speaker_names: body.speaker_names });
+
+    return c.json({ success: true, speaker_names: data.speaker_names });
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      return c.json({ error: "Collection not found" }, 404);
+    }
+    return c.json({ error: err.message }, 500);
   }
 });
 
