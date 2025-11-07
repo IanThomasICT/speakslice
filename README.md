@@ -7,6 +7,20 @@ SpeakSlice takes audio files (mp3/mp4/wav) and returns:
 - Word-level transcripts with confidence scores
 - Per-segment transcripts aligned to speakers
 
+## Table of Contents
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [API Endpoints](#api-endpoints)
+- [Web UI](#web-ui)
+- [Project Structure](#project-structure)
+- [Dependencies](#dependencies)
+- [Constraints](#constraints)
+- [Performance](#performance)
+- [Development](#development)
+- [Testing](#testing)
+- [License](#license)
+
 ## Features
 
 - **Free & CPU-optimized**: No paid services or GPU requirements
@@ -109,20 +123,6 @@ docker compose up --build
 
 ## API Endpoints
 
-### Web UI
-
-Access the testing interface at:
-```
-http://localhost:8000/app
-```
-
-Features:
-- File upload (MP3/MP4/WAV)
-- Model configuration (ASR model, language, speaker count)
-- Live processing status
-- Speaker-segmented transcript display
-- Raw JSON response viewer
-
 ### Health Check
 
 ```bash
@@ -223,10 +223,66 @@ curl -X POST http://localhost:8000/v1/process \
 All processing outputs are automatically saved to timestamped directories:
 - Location: `cache/YYYYMMDD-HHmm/` (e.g., `cache/20251106-1830/`)
 - Files saved:
+  - `audio.wav` - Preprocessed audio (16kHz mono WAV)
   - `diarization.json` - Speaker segments
   - `asr.json` - Transcription with words and segments
   - `aligned.json` - Speaker-aligned transcript
-  - `response.json` - Complete API response
+  - `response.json` - Complete API response (includes speaker_names)
+
+## Web UI
+
+Access the interactive web interface at `http://localhost:8000/app` for a complete audio processing experience.
+
+### Features
+
+**Two-Tab Interface:**
+- **Upload Tab**: Process new audio files with configurable options
+- **Collections Tab**: Browse and review previously processed files
+
+**File Upload & Processing:**
+- Drag-and-drop or click to upload MP3/MP4/WAV files (max 2GB)
+- Configure ASR model (tiny/base/small/medium), language, and max speakers
+- Live processing status with animated loader
+- Results display with speaker-segmented transcript
+
+**Collections Management:**
+- Grid view of all processed files with metadata
+- Shows filename, date, duration, and speaker count
+- Click any collection to load audio and transcript
+- Persistent storage in `cache/` directory
+
+### Interactive Components
+
+**Audio Bar** (Sticky Player):
+- **Always accessible**: Sticks to top of screen while scrolling through transcript
+- **Smooth transitions**: Enhanced UI when sticky (rounded corners, shadow, centered)
+- **Controls**:
+  - Play/pause button with animated SVG icons
+  - Time scrubber with current/total time display
+  - **Playback speed**: Dropdown selector (1x, 1.25x, 1.5x, 2x)
+  - Save button for speaker name changes
+- **Visual feedback**: Loading indicator for audio file
+
+**Speaker Snippets** (Interactive Transcript):
+- **Color-coded speakers**: Each speaker gets a consistent color (supports up to 10 speakers)
+- **Hover effects**: Border expands and background highlights on mouse over
+- **Click-to-seek**: Click any segment to jump audio to that timestamp (auto-plays)
+- **Active highlighting**: Currently playing segment highlighted with blue background
+- **Auto-scroll**: Transcript follows audio playback
+- **Speaker renaming**:
+  - Double-click any speaker name to rename
+  - Updates all occurrences in transcript
+  - Click "Save" to persist changes to collection
+- **Timestamps**: Each segment shows speaker name and start time
+
+### User Workflow
+
+1. **Upload & Process**: Upload audio → Configure options → Click "Process"
+2. **Review**: View speaker-segmented transcript with color coding
+3. **Navigate**: Click segments to jump to specific parts of audio
+4. **Customize**: Rename speakers (e.g., "SPEAKER_00" → "John")
+5. **Save**: Persist speaker names for future reference
+6. **Revisit**: Access processed files anytime via Collections tab
 
 ## Project Structure
 
@@ -235,9 +291,15 @@ speakslice/
 ├── src/
 │   ├── server.ts              # Hono API with /app UI and /v1 endpoints
 │   ├── server.test.ts         # Bun unit tests
+│   ├── assets/                # SVG icons for web UI
+│   │   ├── play.svg          # Play button icon
+│   │   ├── pause.svg         # Pause button icon
+│   │   ├── save.svg          # Save button icon
+│   │   ├── loader.svg        # Loading spinner icon
+│   │   └── upload.svg        # Upload icon
 │   └── scripts/
-│       ├── diarize.py         # Diarization CLI script
-│       ├── transcribe.py      # ASR CLI script
+│       ├── diarize.py         # Diarization CLI script (pyannote)
+│       ├── transcribe.py      # ASR CLI script (faster-whisper)
 │       └── download_youtube.py # YouTube download utility (yt-dlp)
 ├── specs/
 │   └── prd.md                # Product requirements document
@@ -247,13 +309,20 @@ speakslice/
 ├── requirements.txt          # Python dependencies
 ├── Dockerfile                # Single container with Bun + Python
 ├── docker-compose.yml        # Docker compose config
-├── cache/                    # Timestamped output directories (YYYYMMDD-HHmm/)
+├── cache/                    # Output persistence + model cache
+│   ├── YYYYMMDD-HHmm/        # Timestamped output directories
+│   │   ├── audio.wav         # Preprocessed audio (16kHz mono WAV)
+│   │   ├── diarization.json  # Speaker diarization output
+│   │   ├── asr.json          # Transcription output
+│   │   ├── aligned.json      # Speaker-aligned transcript
+│   │   └── response.json     # Complete API response (includes speaker_names)
+│   └── hub/                   # HuggingFace model cache
 └── CLAUDE.md                 # Development guidelines
 ```
 
 **Note**: The `cache/` directory serves dual purposes:
-- Model cache: ML models downloaded on first run
-- Output persistence: Timestamped directories with processing results
+- Model cache (`hub/`): ML models downloaded on first run
+- Output persistence (`YYYYMMDD-HHmm/`): Timestamped directories with processing results
 
 ## Dependencies
 
