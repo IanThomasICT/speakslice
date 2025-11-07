@@ -52,6 +52,7 @@ app.use(logger());
 const ASR_MODEL = process.env.ASR_MODEL || "medium";
 const DIARIZE_SCRIPT = process.env.DIARIZE_SCRIPT || "./src/scripts/diarize.py";
 const TRANSCRIBE_SCRIPT = process.env.TRANSCRIBE_SCRIPT || "./src/scripts/transcribe.py";
+const YOUTUBE_DOWNLOAD_SCRIPT = process.env.YOUTUBE_DOWNLOAD_SCRIPT || "./src/scripts/download_youtube.py";
 // Use virtual environment Python if it exists, otherwise fall back to system python3
 const PYTHON_BIN = process.env.PYTHON_BIN ||
   (await fs.access(".venv/bin/python").then(() => ".venv/bin/python").catch(() => "python3"));
@@ -291,6 +292,69 @@ async function transcribeWithWhisper(
   });
 }
 
+// Validate YouTube URL format - only accepts standard YouTube URLs
+// Patterns: https://www.youtube.com/watch?v=VIDEO_ID or https://youtu.be/VIDEO_ID
+// Why: Security - prevent arbitrary URLs, ensure yt-dlp gets valid input
+function validateYoutubeUrl(url: string): boolean {
+  const patterns = [
+    /^https:\/\/www\.youtube\.com\/watch\?v=[a-zA-Z0-9_-]{11}$/,
+    /^https:\/\/youtu\.be\/[a-zA-Z0-9_-]{11}$/,
+  ];
+  return patterns.some(pattern => pattern.test(url));
+}
+
+// Download audio from YouTube URL using download_youtube.py script
+// Why: Separation of concerns - Python handles yt-dlp CLI, TypeScript orchestrates
+// Script outputs JSON to stdout with download metadata; stderr for errors
+async function callYoutubeDownloadScript(url: string, outputPath: string): Promise<void> {
+  const args = [YOUTUBE_DOWNLOAD_SCRIPT, url, "--output", outputPath];
+
+  debug("YOUTUBE", "Spawning download script", {
+    script: path.basename(YOUTUBE_DOWNLOAD_SCRIPT),
+    url: url.substring(0, 50) + "...",
+    output: path.basename(outputPath),
+  });
+  const start = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const p = spawn(PYTHON_BIN, args, { env: process.env });
+    let stdout = "";
+    let stderr = "";
+    p.stdout.on("data", (d) => (stdout += d.toString()));
+    p.stderr.on("data", (d) => {
+      stderr += d.toString();
+      // Log progress messages from Python script in real-time
+      const lines = d.toString().split('\n');
+      for (const line of lines) {
+        if (line.includes('[PROGRESS]')) {
+          debug("YOUTUBE", line.replace('[PROGRESS]', '').trim(), {});
+        }
+      }
+    });
+    p.on("close", (code) => {
+      const elapsed = Date.now() - start;
+      if (code !== 0) {
+        debug("YOUTUBE", "Download failed", { exit_code: code, error: stderr.substring(0, 200) });
+        reject(new Error(`YouTube download failed: ${stderr}`));
+      } else {
+        try {
+          const result = JSON.parse(stdout);
+          debug("YOUTUBE", "Download complete", {
+            title: result.title?.substring(0, 50),
+            duration: result.duration,
+            file_size_bytes: result.file_size_bytes,
+            elapsed_ms: elapsed,
+          });
+          resolve();
+        } catch (e) {
+          debug("YOUTUBE", "Parse failed", { error: String(e), output_preview: stdout.substring(0, 100) });
+          reject(new Error(`Failed to parse YouTube download output: ${e}`));
+        }
+      }
+    });
+  });
+}
+
 // Web UI for E2E testing - simple HTML interface for uploading and testing
 // Why: Manual testing without curl; makes it easy to verify end-to-end flow
 // Uses Tailwind v4 CDN for styling without build step
@@ -325,8 +389,23 @@ app.get("/app", (c) => {
     <div id="uploadContent">
       <div class="max-w-xl mx-auto mb-8">
         <form id="uploadForm" class="space-y-3">
-          <input type="file" id="audioFile" accept="audio/*,video/*" required
+          <input type="file" id="audioFile" accept="audio/*,video/*"
             class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+
+          <div class="relative">
+            <div class="absolute inset-0 flex items-center">
+              <div class="w-full border-t border-gray-300"></div>
+            </div>
+            <div class="relative flex justify-center text-xs">
+              <span class="px-2 bg-gray-50 text-gray-500">OR</span>
+            </div>
+          </div>
+
+          <div class="space-y-1">
+            <input type="text" id="youtubeUrl" placeholder="Paste YouTube URL: https://www.youtube.com/watch?v=..."
+              class="block w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-blue-500 focus:border-blue-500">
+            <p class="text-xs text-gray-500">Supported formats: youtube.com/watch?v= or youtu.be/</p>
+          </div>
 
           <details class="text-xs">
             <summary class="text-gray-500 hover:text-gray-700 cursor-pointer">Options</summary>
@@ -508,17 +587,78 @@ app.get("/app", (c) => {
     const error = document.getElementById('error');
     const submitBtn = document.getElementById('submitBtn');
 
+    // YouTube URL validation patterns
+    const YOUTUBE_PATTERNS = [
+      /^https:\/\/www\.youtube\.com\/watch\?v=[a-zA-Z0-9_-]{11}$/,
+      /^https:\/\/youtu\.be\/[a-zA-Z0-9_-]{11}$/
+    ];
+
+    function validateYoutubeUrl(url) {
+      return YOUTUBE_PATTERNS.some(pattern => pattern.test(url));
+    }
+
+    // Add real-time validation feedback for YouTube URL
+    const youtubeUrlInput = document.getElementById('youtubeUrl');
+    youtubeUrlInput.addEventListener('input', (e) => {
+      const url = e.target.value.trim();
+      if (url && !validateYoutubeUrl(url)) {
+        e.target.classList.add('border-red-500');
+        e.target.classList.remove('border-gray-300');
+      } else {
+        e.target.classList.remove('border-red-500');
+        e.target.classList.add('border-gray-300');
+      }
+    });
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
+
+      const fileInput = document.getElementById('audioFile');
+      const youtubeUrl = youtubeUrlInput.value.trim();
+
+      // Validate: require exactly ONE input method
+      if (!fileInput.files[0] && !youtubeUrl) {
+        error.textContent = 'Please upload a file or provide a YouTube URL';
+        error.classList.remove('hidden');
+        return;
+      }
+
+      if (fileInput.files[0] && youtubeUrl) {
+        error.textContent = 'Please use only one input method (file or YouTube URL)';
+        error.classList.remove('hidden');
+        return;
+      }
+
+      // Validate YouTube URL format
+      if (youtubeUrl && !validateYoutubeUrl(youtubeUrl)) {
+        error.textContent = 'Invalid YouTube URL format. Use: https://www.youtube.com/watch?v=... or https://youtu.be/...';
+        error.classList.remove('hidden');
+        return;
+      }
 
       progress.classList.remove('hidden');
       results.classList.add('hidden');
       error.classList.add('hidden');
       submitBtn.disabled = true;
 
+      // Update progress message for YouTube downloads
+      const progressSpan = progress.querySelector('span');
+      if (youtubeUrl) {
+        progressSpan.textContent = 'Downloading from YouTube...';
+      } else {
+        progressSpan.textContent = 'Processing...';
+      }
+
       try {
         const formData = new FormData();
-        formData.append('file', document.getElementById('audioFile').files[0]);
+
+        // Add file OR youtube_url
+        if (fileInput.files[0]) {
+          formData.append('file', fileInput.files[0]);
+        } else if (youtubeUrl) {
+          formData.append('youtube_url', youtubeUrl);
+        }
+
         formData.append('asr_model', document.getElementById('asrModel').value);
         formData.append('language', document.getElementById('language').value);
 
@@ -543,6 +683,7 @@ app.get("/app", (c) => {
         error.classList.remove('hidden');
       } finally {
         progress.classList.add('hidden');
+        progressSpan.textContent = 'Processing...';
         submitBtn.disabled = false;
       }
     });
@@ -898,12 +1039,23 @@ app.post("/v1/process", async (c) => {
   // Parse multipart form data - Hono provides built-in parser for file uploads
   const form = await c.req.parseBody();
   const file = form["file"];
-  if (!file || !(file as File).stream) {
-    return c.text("file is required (multipart/form-data)", 400);
+  const youtubeUrl = form["youtube_url"] as string | undefined;
+
+  // Validate: require either file OR youtube_url (not both, not neither)
+  if (!file && !youtubeUrl) {
+    return c.json({ error: "file or youtube_url is required" }, 400);
+  }
+  if (file && youtubeUrl) {
+    return c.json({ error: "provide either file or youtube_url, not both" }, 400);
   }
 
-  const filename = (file as File).name || "unknown";
-  const contentType = (file as File).type || "unknown";
+  // Validate YouTube URL format if provided
+  if (youtubeUrl && !validateYoutubeUrl(youtubeUrl)) {
+    return c.json({ error: "invalid YouTube URL format. Use: https://www.youtube.com/watch?v=... or https://youtu.be/..." }, 400);
+  }
+
+  const filename = file ? ((file as File).name || "unknown") : "youtube-audio.wav";
+  const contentType = file ? ((file as File).type || "unknown") : "audio/wav";
 
   // Extract optional parameters with sensible defaults
   // Why defaults: most users want medium model, auto language detection, no speaker limit
@@ -930,50 +1082,68 @@ app.post("/v1/process", async (c) => {
   const srcPath = path.join(tmpDir, "input.bin");
   const outWav = path.join(tmpDir, "audio.wav");
 
-  debug("UPLOAD", "File received", {
+  debug(youtubeUrl ? "YOUTUBE" : "UPLOAD", youtubeUrl ? "URL received" : "File received", {
     filename,
     content_type: contentType,
     request_id: id,
     asr_model: asrModel,
     language,
     max_speakers: maxSpeakers,
+    youtube_url: youtubeUrl?.substring(0, 50),
   }, 2);
 
   debug("TEMP", "Directory created", { path: tmpDir, id }, 3);
 
-  // Stream uploaded file to disk (handles large files without memory overflow)
-  const write = createWriteStream(srcPath);
-  const stream = (file as File).stream();
-  const reader = stream.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    write.write(value);
-  }
-
-  // Wait for write stream to finish before proceeding
-  await new Promise<void>((resolve, reject) => {
-    write.on('finish', resolve);
-    write.on('error', reject);
-    write.end();
-  });
-
-  try {
-    // Enforce 2GB size limit to prevent memory/disk issues with huge files
-    const stat = await fs.stat(srcPath);
-    debug("UPLOAD", "File written to disk", { size_bytes: stat.size, size_mb: (stat.size / 1024 / 1024).toFixed(2) }, 5);
-
-    if (stat.size > 2 * 1024 * 1024 * 1024) {
-      debug("UPLOAD", "File too large, rejecting", { size_bytes: stat.size });
-      return c.text("File too large", 413);
+  // Branch: Download from YouTube OR stream uploaded file
+  if (youtubeUrl) {
+    // Download YouTube audio directly to WAV format
+    debug("YOUTUBE", "Starting download", { url: youtubeUrl.substring(0, 50) }, 5);
+    try {
+      await callYoutubeDownloadScript(youtubeUrl, outWav);
+      debug("YOUTUBE", "Download complete", {}, 10);
+    } catch (err) {
+      debug("YOUTUBE", "Download failed", { error: String(err) });
+      return c.json({ error: `YouTube download failed: ${String(err)}` }, 500);
+    }
+  } else {
+    // Stream uploaded file to disk (handles large files without memory overflow)
+    const write = createWriteStream(srcPath);
+    const stream = (file as File).stream();
+    const reader = stream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      write.write(value);
     }
 
-    // Preprocess: Convert any format (mp3/mp4/wav) to standardized 16kHz mono WAV
-    // Why: ML models require consistent input format; ffmpeg handles all conversions
-    debug("PREPROCESS", "Starting audio conversion to 16kHz mono WAV", {}, 8);
-    await runFfmpegToWav16kMono(srcPath, outWav);
+    // Wait for write stream to finish before proceeding
+    await new Promise<void>((resolve, reject) => {
+      write.on('finish', resolve);
+      write.on('error', reject);
+      write.end();
+    });
+  }
+
+  try {
+    // For file uploads: enforce 2GB size limit and convert to WAV
+    if (!youtubeUrl) {
+      const stat = await fs.stat(srcPath);
+      debug("UPLOAD", "File written to disk", { size_bytes: stat.size, size_mb: (stat.size / 1024 / 1024).toFixed(2) }, 5);
+
+      if (stat.size > 2 * 1024 * 1024 * 1024) {
+        debug("UPLOAD", "File too large, rejecting", { size_bytes: stat.size });
+        return c.text("File too large", 413);
+      }
+
+      // Preprocess: Convert any format (mp3/mp4/wav) to standardized 16kHz mono WAV
+      // Why: ML models require consistent input format; ffmpeg handles all conversions
+      debug("PREPROCESS", "Starting audio conversion to 16kHz mono WAV", {}, 8);
+      await runFfmpegToWav16kMono(srcPath, outWav);
+    }
+
+    // Get duration (YouTube download already in WAV format, file upload converted above)
     const duration = (await getDurationSec(outWav)) ?? null;
-    debug("PREPROCESS", "Audio conversion complete", { duration_sec: duration }, 12);
+    debug("PREPROCESS", youtubeUrl ? "YouTube audio ready" : "Audio conversion complete", { duration_sec: duration }, 12);
 
     // Key optimization: Run ASR and diarization in parallel (both read same WAV file)
     // Why: Saves ~50% processing time since operations are independent
