@@ -358,7 +358,7 @@ app.get("/app", (c) => {
 
         <div id="progress" class="hidden mt-4 text-center">
           <div class="inline-flex items-center space-x-2 text-sm text-gray-600">
-            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <svg class="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             <span>Processing...</span>
           </div>
         </div>
@@ -384,18 +384,18 @@ app.get("/app", (c) => {
             <div><span id="detectedLang">-</span></div>
             <div><span id="speakerCount">-</span> speakers</div>
           </div>
-          <button id="saveNamesBtn" class="hidden px-3 py-1 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 cursor-pointer">
-            Save
-          </button>
         </div>
 
-        <!-- Audio Player -->
-        <div id="audioPlayer" class="hidden mb-6">
-          <div class="flex items-center gap-3 p-3 bg-gray-50 rounded">
+        <!-- Sentinel element for sticky detection -->
+        <div id="audioSentinel"></div>
+
+        <!-- Audio Player - Sticky with enhanced UI transitions -->
+        <div id="audioPlayer" class="hidden sticky top-0 z-20 bg-white mb-6 py-4 transition-all duration-300 ease-in-out shadow-md">
+          <div class="flex items-center justify-center gap-3 max-w-4xl mx-auto px-4">
             <button id="playBtn" class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center cursor-pointer hover:bg-blue-700 flex-shrink-0">
-              <span id="playIcon">▶</span>
+              <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>
             </button>
-            <div class="flex-1">
+            <div class="flex-1 max-w-2xl">
               <input type="range" id="audioSeeker" min="0" max="100" value="0" step="0.01"
                 class="w-full cursor-pointer">
               <div class="flex justify-between text-xs text-gray-500 mt-1">
@@ -403,8 +403,12 @@ app.get("/app", (c) => {
                 <span id="totalTime">0:00</span>
               </div>
             </div>
+            <button id="saveNamesBtn" class="hidden px-3 py-2 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 cursor-pointer flex-shrink-0 flex items-center gap-1.5">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
+              <span>Save</span>
+            </button>
             <div id="audioLoading" class="hidden flex-shrink-0">
-              <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+              <svg class="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             </div>
           </div>
           <audio id="audioElement" class="hidden"></audio>
@@ -445,6 +449,30 @@ app.get("/app", (c) => {
     let audioElement = null;
     let isAudioLoaded = false;
     let currentSegmentIndex = -1;
+
+    // Sticky audio bar detection and styling
+    function setupStickyAudioBar() {
+      const sentinel = document.getElementById('audioSentinel');
+      const audioPlayer = document.getElementById('audioPlayer');
+
+      if (!sentinel || !audioPlayer) return;
+
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          // When sentinel is not intersecting (out of view), audio bar is sticky
+          if (!entry.isIntersecting) {
+            audioPlayer.classList.add('rounded-xl', 'shadow-xl', 'top-3', 'mx-4');
+            audioPlayer.classList.remove('shadow-md', 'top-0');
+          } else {
+            audioPlayer.classList.remove('rounded-xl', 'shadow-xl', 'top-3', 'mx-4');
+            audioPlayer.classList.add('shadow-md', 'top-0');
+          }
+        },
+        { threshold: 0, rootMargin: '0px' }
+      );
+
+      observer.observe(sentinel);
+    }
 
     // Tab switching
     const uploadTab = document.getElementById('uploadTab');
@@ -684,6 +712,9 @@ app.get("/app", (c) => {
           document.getElementById('audioPlayer').classList.remove('hidden');
           isAudioLoaded = true;
           loading.classList.add('hidden');
+
+          // Setup sticky audio bar observer
+          setupStickyAudioBar();
         });
 
         // Update UI during playback
@@ -735,12 +766,15 @@ app.get("/app", (c) => {
     document.getElementById('playBtn').addEventListener('click', () => {
       if (!audioElement || !isAudioLoaded) return;
 
+      const playIcon = document.getElementById('playIcon');
       if (audioElement.paused) {
         audioElement.play();
-        document.getElementById('playIcon').textContent = '⏸';
+        // Change to pause icon
+        playIcon.innerHTML = '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>';
       } else {
         audioElement.pause();
-        document.getElementById('playIcon').textContent = '▶';
+        // Change to play icon
+        playIcon.innerHTML = '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>';
       }
     });
 
@@ -769,11 +803,11 @@ app.get("/app", (c) => {
 
         // Show success feedback
         const btn = document.getElementById('saveNamesBtn');
-        btn.textContent = '✓';
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Saved</span>';
         btn.classList.remove('bg-green-600', 'hover:bg-green-700');
         btn.classList.add('bg-gray-300');
         setTimeout(() => {
-          btn.textContent = 'Save';
+          btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg><span>Save</span>';
           btn.classList.remove('bg-gray-300');
           btn.classList.add('bg-green-600', 'hover:bg-green-700');
           btn.classList.add('hidden');
