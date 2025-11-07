@@ -586,29 +586,7 @@ app.get("/app", (c) => {
     const results = document.getElementById('results');
     const error = document.getElementById('error');
     const submitBtn = document.getElementById('submitBtn');
-
-    // YouTube URL validation patterns
-    const YOUTUBE_PATTERNS = [
-      /^https:\/\/www\.youtube\.com\/watch\?v=[a-zA-Z0-9_-]{11}$/,
-      /^https:\/\/youtu\.be\/[a-zA-Z0-9_-]{11}$/
-    ];
-
-    function validateYoutubeUrl(url) {
-      return YOUTUBE_PATTERNS.some(pattern => pattern.test(url));
-    }
-
-    // Add real-time validation feedback for YouTube URL
     const youtubeUrlInput = document.getElementById('youtubeUrl');
-    youtubeUrlInput.addEventListener('input', (e) => {
-      const url = e.target.value.trim();
-      if (url && !validateYoutubeUrl(url)) {
-        e.target.classList.add('border-red-500');
-        e.target.classList.remove('border-gray-300');
-      } else {
-        e.target.classList.remove('border-red-500');
-        e.target.classList.add('border-gray-300');
-      }
-    });
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -625,13 +603,6 @@ app.get("/app", (c) => {
 
       if (fileInput.files[0] && youtubeUrl) {
         error.textContent = 'Please use only one input method (file or YouTube URL)';
-        error.classList.remove('hidden');
-        return;
-      }
-
-      // Validate YouTube URL format
-      if (youtubeUrl && !validateYoutubeUrl(youtubeUrl)) {
-        error.textContent = 'Invalid YouTube URL format. Use: https://www.youtube.com/watch?v=... or https://youtu.be/...';
         error.classList.remove('hidden');
         return;
       }
@@ -717,7 +688,7 @@ app.get("/app", (c) => {
             <h3 class="text-sm font-medium text-gray-900 mb-1 truncate">\${col.filename}</h3>
             <div class="text-xs text-gray-500 space-y-0.5">
               <div>\${dateStr}</div>
-              <div>\${col.duration_sec?.toFixed(0) || '?'}s · \${col.speaker_count} spk</div>
+              <div>\${col.duration_sec ? col.duration_sec.toFixed(0) : '?'}s · \${col.speaker_count} spk</div>
             </div>
           \`;
 
@@ -755,7 +726,7 @@ app.get("/app", (c) => {
       speakerNames = data.speaker_names || {};
 
       // Metadata
-      document.getElementById('duration').textContent = data.duration_sec?.toFixed(0) || '?';
+      document.getElementById('duration').textContent = data.duration_sec ? data.duration_sec.toFixed(0) : '?';
       document.getElementById('detectedLang').textContent = data.asr?.language || '?';
 
       const speakers = new Set(data.aligned.speaker_segments.map(s => s.speaker));
