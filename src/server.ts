@@ -2,6 +2,7 @@
 // nanoid generates unique IDs for temp directories to avoid file conflicts
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { serveStatic } from "hono/bun";
 import { serve } from "bun";
 import { nanoid } from "nanoid";
 // spawn() creates child processes to run Python scripts and capture their output
@@ -47,6 +48,9 @@ const app = new Hono();
 // Add HTTP request logging middleware (shows METHOD PATH STATUS TIMING)
 app.use(logger());
 
+// Serve static files from public directory (React bundle)
+app.use('/public/*', serveStatic({ root: './' }));
+
 // Configuration: Allow overriding via env vars for flexibility
 // Default to "medium" Whisper model for balanced speed/accuracy tradeoff
 const ASR_MODEL = process.env.ASR_MODEL || "medium";
@@ -56,6 +60,15 @@ const YOUTUBE_DOWNLOAD_SCRIPT = process.env.YOUTUBE_DOWNLOAD_SCRIPT || "./src/sc
 // Use virtual environment Python if it exists, otherwise fall back to system python3
 const PYTHON_BIN = process.env.PYTHON_BIN ||
   (await fs.access(".venv/bin/python").then(() => ".venv/bin/python").catch(() => "python3"));
+
+// Optimized diarization settings for YouTube URLs with transcripts
+// Why: When using transcript for ASR, apply "FULL THROTTLE" diarization optimization
+// Trades minor accuracy for 30-40% speed improvement
+const OPTIMIZED_DIARIZATION_OPTIONS = {
+  minSpeakerDuration: 1.0,     // Increased from 0.5 for speed
+  enableOverlap: false,         // Disable overlap detection (saves ~20-30% time)
+  batchSize: 64                 // Increased from 32 for faster processing
+};
 
 // Convert any audio format to standardized 16kHz mono WAV for ML models
 // Why: pyannote and faster-whisper require consistent audio format (16kHz, mono, WAV)
@@ -303,18 +316,93 @@ function validateYoutubeUrl(url: string): boolean {
   return patterns.some(pattern => pattern.test(url));
 }
 
+// Load YouTube transcript and convert to ASR format
+// Why: Allows transcript to seamlessly replace ASR in pipeline
+// Creates word-level timestamps by distributing evenly across segment
+async function loadTranscriptAsASR(transcriptPath: string): Promise<any> {
+  const transcriptData = JSON.parse(await Bun.file(transcriptPath).text());
+  const segments = transcriptData.segments || [];
+
+  const words: Word[] = [];
+  const asrSegments: ASRSeg[] = [];
+
+  for (const seg of segments) {
+    const text = seg.text.trim();
+    if (!text) continue;
+
+    const wordList = text.split(/\s+/);
+    const segmentDuration = seg.end - seg.start;
+    const timePerWord = segmentDuration / wordList.length;
+
+    // Generate word-level timestamps
+    const segmentWords: Word[] = [];
+    for (let i = 0; i < wordList.length; i++) {
+      const wordStart = seg.start + (i * timePerWord);
+      const wordEnd = seg.start + ((i + 1) * timePerWord);
+
+      const word: Word = {
+        start: wordStart,
+        end: wordEnd,
+        text: wordList[i],
+        confidence: 1.0  // Assume transcript is accurate
+      };
+
+      words.push(word);
+      segmentWords.push(word);
+    }
+
+    // Create segment
+    asrSegments.push({
+      start: seg.start,
+      end: seg.end,
+      text: text,
+      avg_confidence: 1.0
+    });
+  }
+
+  return {
+    language: transcriptData.language || 'en',
+    language_probability: 1.0,
+    duration: segments.length > 0 ? segments[segments.length - 1].end : 0,
+    words: words,
+    segments: asrSegments,
+    source: 'youtube_transcript'  // Tag for debugging
+  };
+}
+
 // Download audio from YouTube URL using download_youtube.py script
 // Why: Separation of concerns - Python handles yt-dlp CLI, TypeScript orchestrates
 // Script outputs JSON to stdout with download metadata; stderr for errors
-async function callYoutubeDownloadScript(url: string, outputPath: string): Promise<void> {
+async function callYoutubeDownloadScript(
+  url: string,
+  outputPath: string,
+  start?: number,
+  end?: number,
+  fetchTranscript: boolean = true
+): Promise<{transcriptAvailable: boolean; videoTitle?: string}> {
   const args = [YOUTUBE_DOWNLOAD_SCRIPT, url, "--output", outputPath];
+
+  // Add time cropping parameters if provided
+  if (start !== undefined && start > 0) {
+    args.push("--start", Math.floor(start).toString());
+  }
+  if (end !== undefined) {
+    args.push("--end", Math.floor(end).toString());
+  }
+
+  // Always add transcript flag for YouTube URLs
+  if (fetchTranscript) {
+    args.push("--transcript");
+  }
 
   debug("YOUTUBE", "Spawning download script", {
     script: path.basename(YOUTUBE_DOWNLOAD_SCRIPT),
     url: url.substring(0, 50) + "...",
     output: path.basename(outputPath),
+    start: start !== undefined ? start : 'none',
+    end: end !== undefined ? end : 'none',
   });
-  const start = Date.now();
+  const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
     const p = spawn(PYTHON_BIN, args, { env: process.env });
@@ -332,7 +420,7 @@ async function callYoutubeDownloadScript(url: string, outputPath: string): Promi
       }
     });
     p.on("close", (code) => {
-      const elapsed = Date.now() - start;
+      const elapsed = Date.now() - startTime;
       if (code !== 0) {
         debug("YOUTUBE", "Download failed", { exit_code: code, error: stderr.substring(0, 200) });
         reject(new Error(`YouTube download failed: ${stderr}`));
@@ -343,9 +431,14 @@ async function callYoutubeDownloadScript(url: string, outputPath: string): Promi
             title: result.title?.substring(0, 50),
             duration: result.duration,
             file_size_bytes: result.file_size_bytes,
+            transcript_available: result.transcript_available || false,
+            transcript_segments: result.transcript_segments || 0,
             elapsed_ms: elapsed,
           });
-          resolve();
+          resolve({
+            transcriptAvailable: result.transcript_available || false,
+            videoTitle: result.title
+          });
         } catch (e) {
           debug("YOUTUBE", "Parse failed", { error: String(e), output_preview: stdout.substring(0, 100) });
           reject(new Error(`Failed to parse YouTube download output: ${e}`));
@@ -355,629 +448,19 @@ async function callYoutubeDownloadScript(url: string, outputPath: string): Promi
   });
 }
 
-// Web UI for E2E testing - simple HTML interface for uploading and testing
-// Why: Manual testing without curl; makes it easy to verify end-to-end flow
-// Uses Tailwind v4 CDN for styling without build step
-app.get("/app", (c) => {
-  return c.html(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SpeakSlice - Audio Diarization & Transcription</title>
-  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-</head>
-<body class="bg-gray-50 min-h-screen">
-  <!-- Header as aside in top-left -->
-  <aside class="fixed top-4 left-4 z-10">
-    <h1 class="text-lg font-bold text-gray-900">SpeakSlice</h1>
-    <p class="text-xs text-gray-500">Free, CPU-first diarization</p>
-  </aside>
 
-  <div class="max-w-5xl mx-auto pt-20 px-4">
-    <!-- Tab Navigation at top -->
-    <div class="flex justify-center space-x-6 mb-8 border-b border-gray-200">
-      <button id="uploadTab" class="px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer">
-        Upload
-      </button>
-      <button id="collectionsTab" class="px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer">
-        Collections
-      </button>
-    </div>
-
-    <!-- Upload Tab Content -->
-    <div id="uploadContent">
-      <div class="max-w-xl mx-auto mb-8">
-        <form id="uploadForm" class="space-y-3">
-          <input type="file" id="audioFile" accept="audio/*,video/*"
-            class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
-
-          <div class="relative">
-            <div class="absolute inset-0 flex items-center">
-              <div class="w-full border-t border-gray-300"></div>
-            </div>
-            <div class="relative flex justify-center text-xs">
-              <span class="px-2 bg-gray-50 text-gray-500">OR</span>
-            </div>
-          </div>
-
-          <div class="space-y-1">
-            <input type="text" id="youtubeUrl" placeholder="Paste YouTube URL: https://www.youtube.com/watch?v=..."
-              class="block w-full px-3 py-2 text-sm border border-gray-300 rounded focus:ring-blue-500 focus:border-blue-500">
-            <p class="text-xs text-gray-500">Supported formats: youtube.com/watch?v= or youtu.be/</p>
-          </div>
-
-          <details class="text-xs">
-            <summary class="text-gray-500 hover:text-gray-700 cursor-pointer">Options</summary>
-            <div class="mt-2 space-y-2 pl-3 border-l border-gray-200">
-              <select id="asrModel" class="block w-full rounded border-gray-300 text-xs">
-                <option value="tiny">Tiny</option>
-                <option value="base">Base</option>
-                <option value="small">Small</option>
-                <option value="medium" selected>Medium</option>
-              </select>
-              <select id="language" class="block w-full rounded border-gray-300 text-xs">
-                <option value="auto">Auto-detect</option>
-                <option value="en">English</option>
-                <option value="es">Spanish</option>
-                <option value="fr">French</option>
-                <option value="de">German</option>
-                <option value="zh">Chinese</option>
-              </select>
-              <input type="number" id="maxSpeakers" min="1" max="10" placeholder="Max speakers"
-                class="block w-full rounded border-gray-300 text-xs">
-            </div>
-          </details>
-
-          <button type="submit" id="submitBtn"
-            class="w-full bg-blue-600 text-white py-2 px-4 rounded text-sm font-medium hover:bg-blue-700 cursor-pointer disabled:bg-gray-400 disabled:cursor-not-allowed">
-            Process
-          </button>
-        </form>
-
-        <div id="progress" class="hidden mt-4 text-center">
-          <div class="inline-flex items-center space-x-2 text-sm text-gray-600">
-            <svg class="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-            <span>Processing...</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Collections Tab Content -->
-    <div id="collectionsContent" class="hidden">
-      <div class="mb-8">
-        <div id="collectionsGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 max-w-4xl mx-auto"></div>
-        <div id="collectionsEmpty" class="hidden text-center py-12 text-sm text-gray-400">
-          No files yet
-        </div>
-      </div>
-    </div>
-
-    <!-- Results Display (shared) -->
-    <div id="results" class="hidden">
-      <div class="max-w-4xl mx-auto">
-        <div class="flex justify-between items-center mb-6">
-          <div class="flex items-baseline gap-6 text-xs text-gray-500">
-            <div><span id="duration">-</span>s</div>
-            <div><span id="detectedLang">-</span></div>
-            <div><span id="speakerCount">-</span> speakers</div>
-          </div>
-        </div>
-
-        <!-- Sentinel element for sticky detection -->
-        <div id="audioSentinel"></div>
-
-        <!-- Audio Player - Sticky with enhanced UI transitions -->
-        <div id="audioPlayer" class="hidden sticky top-0 z-20 bg-white mb-6 py-4 transition-all duration-300 ease-in-out shadow-md">
-          <div class="flex items-center justify-center gap-3 max-w-4xl mx-auto px-4">
-            <button id="playBtn" class="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center cursor-pointer hover:bg-blue-700 flex-shrink-0">
-              <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>
-            </button>
-            <div class="flex-1 max-w-2xl">
-              <input type="range" id="audioSeeker" min="0" max="100" value="0" step="0.01"
-                class="w-full cursor-pointer">
-              <div class="flex justify-between text-xs text-gray-500 mt-1">
-                <span id="currentTime">0:00</span>
-                <span id="totalTime">0:00</span>
-              </div>
-            </div>
-            <select id="playbackSpeed" class="px-2 py-1.5 bg-gray-100 text-gray-700 rounded text-xs font-medium hover:bg-gray-200 cursor-pointer border border-gray-300 flex-shrink-0">
-              <option value="1">1x</option>
-              <option value="1.25">1.25x</option>
-              <option value="1.5">1.5x</option>
-              <option value="2">2x</option>
-            </select>
-            <button id="saveNamesBtn" class="hidden px-3 py-2 bg-green-600 text-white rounded text-xs font-medium hover:bg-green-700 cursor-pointer flex-shrink-0 flex items-center gap-1.5">
-              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
-              <span>Save</span>
-            </button>
-            <div id="audioLoading" class="hidden flex-shrink-0">
-              <svg class="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-            </div>
-          </div>
-          <audio id="audioElement" class="hidden"></audio>
-        </div>
-
-        <p class="text-xs text-gray-400 mb-4">Double-click speaker name to rename</p>
-        <div id="transcript" class="space-y-4"></div>
-
-        <details class="mt-8">
-          <summary class="text-xs text-gray-400 hover:text-gray-600 cursor-pointer">Raw JSON</summary>
-          <pre id="rawJson" class="mt-2 p-3 bg-gray-50 rounded text-xs overflow-x-auto"></pre>
-        </details>
-      </div>
-    </div>
-
-    <div id="error" class="hidden bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-800 max-w-2xl mx-auto"></div>
-  </div>
-
-  <script>
-    // Speaker color palette (consistent mapping)
-    const SPEAKER_COLORS = {
-      'SPEAKER_00': { border: 'rgb(59, 130, 246)', bg: 'rgb(239, 246, 255)', text: 'rgb(29, 78, 216)' }, // blue
-      'SPEAKER_01': { border: 'rgb(249, 115, 22)', bg: 'rgb(255, 247, 237)', text: 'rgb(194, 65, 12)' }, // orange
-      'SPEAKER_02': { border: 'rgb(34, 197, 94)', bg: 'rgb(240, 253, 244)', text: 'rgb(21, 128, 61)' }, // green
-      'SPEAKER_03': { border: 'rgb(234, 179, 8)', bg: 'rgb(254, 252, 232)', text: 'rgb(161, 98, 7)' }, // yellow
-      'SPEAKER_04': { border: 'rgb(168, 85, 247)', bg: 'rgb(250, 245, 255)', text: 'rgb(107, 33, 168)' }, // purple
-      'SPEAKER_05': { border: 'rgb(236, 72, 153)', bg: 'rgb(253, 242, 248)', text: 'rgb(157, 23, 77)' }, // pink
-      'SPEAKER_06': { border: 'rgb(99, 102, 241)', bg: 'rgb(238, 242, 255)', text: 'rgb(67, 56, 202)' }, // indigo
-      'SPEAKER_07': { border: 'rgb(6, 182, 212)', bg: 'rgb(236, 254, 255)', text: 'rgb(14, 116, 144)' }, // cyan
-      'SPEAKER_08': { border: 'rgb(132, 204, 22)', bg: 'rgb(247, 254, 231)', text: 'rgb(77, 124, 15)' }, // lime
-      'SPEAKER_09': { border: 'rgb(244, 63, 94)', bg: 'rgb(255, 241, 242)', text: 'rgb(159, 18, 57)' }, // rose
-    };
-
-    // Global state
-    let currentData = null;
-    let currentCollectionId = null;
-    let speakerNames = {};
-    let audioElement = null;
-    let isAudioLoaded = false;
-    let currentSegmentIndex = -1;
-
-    // Sticky audio bar detection and styling
-    function setupStickyAudioBar() {
-      const sentinel = document.getElementById('audioSentinel');
-      const audioPlayer = document.getElementById('audioPlayer');
-
-      if (!sentinel || !audioPlayer) return;
-
-      const observer = new IntersectionObserver(
-        ([entry]) => {
-          // When sentinel is not intersecting (out of view), audio bar is sticky
-          if (!entry.isIntersecting) {
-            audioPlayer.classList.add('rounded-xl', 'shadow-xl', 'top-3', 'mx-4');
-            audioPlayer.classList.remove('shadow-md', 'top-0');
-          } else {
-            audioPlayer.classList.remove('rounded-xl', 'shadow-xl', 'top-3', 'mx-4');
-            audioPlayer.classList.add('shadow-md', 'top-0');
-          }
-        },
-        { threshold: 0, rootMargin: '0px' }
-      );
-
-      observer.observe(sentinel);
-    }
-
-    // Tab switching
-    const uploadTab = document.getElementById('uploadTab');
-    const collectionsTab = document.getElementById('collectionsTab');
-    const uploadContent = document.getElementById('uploadContent');
-    const collectionsContent = document.getElementById('collectionsContent');
-
-    uploadTab.addEventListener('click', () => {
-      uploadTab.className = 'px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer';
-      collectionsTab.className = 'px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer';
-      uploadContent.classList.remove('hidden');
-      collectionsContent.classList.add('hidden');
-    });
-
-    collectionsTab.addEventListener('click', () => {
-      collectionsTab.className = 'px-3 py-2 text-sm font-medium text-blue-600 border-b-2 border-blue-600 cursor-pointer';
-      uploadTab.className = 'px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 cursor-pointer';
-      collectionsContent.classList.remove('hidden');
-      uploadContent.classList.add('hidden');
-      loadCollections();
-    });
-
-    // Upload form handling
-    const form = document.getElementById('uploadForm');
-    const progress = document.getElementById('progress');
-    const results = document.getElementById('results');
-    const error = document.getElementById('error');
-    const submitBtn = document.getElementById('submitBtn');
-    const youtubeUrlInput = document.getElementById('youtubeUrl');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-
-      const fileInput = document.getElementById('audioFile');
-      const youtubeUrl = youtubeUrlInput.value.trim();
-
-      // Validate: require exactly ONE input method
-      if (!fileInput.files[0] && !youtubeUrl) {
-        error.textContent = 'Please upload a file or provide a YouTube URL';
-        error.classList.remove('hidden');
-        return;
-      }
-
-      if (fileInput.files[0] && youtubeUrl) {
-        error.textContent = 'Please use only one input method (file or YouTube URL)';
-        error.classList.remove('hidden');
-        return;
-      }
-
-      progress.classList.remove('hidden');
-      results.classList.add('hidden');
-      error.classList.add('hidden');
-      submitBtn.disabled = true;
-
-      // Update progress message for YouTube downloads
-      const progressSpan = progress.querySelector('span');
-      if (youtubeUrl) {
-        progressSpan.textContent = 'Downloading from YouTube...';
-      } else {
-        progressSpan.textContent = 'Processing...';
-      }
-
-      try {
-        const formData = new FormData();
-
-        // Add file OR youtube_url
-        if (fileInput.files[0]) {
-          formData.append('file', fileInput.files[0]);
-        } else if (youtubeUrl) {
-          formData.append('youtube_url', youtubeUrl);
-        }
-
-        formData.append('asr_model', document.getElementById('asrModel').value);
-        formData.append('language', document.getElementById('language').value);
-
-        const maxSpeakers = document.getElementById('maxSpeakers').value;
-        if (maxSpeakers) formData.append('max_speakers', maxSpeakers);
-
-        const response = await fetch('/v1/process', {
-          method: 'POST',
-          body: formData
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Processing failed');
-        }
-
-        displayResults(data, null);
-
-      } catch (err) {
-        error.textContent = 'Error: ' + err.message;
-        error.classList.remove('hidden');
-      } finally {
-        progress.classList.add('hidden');
-        progressSpan.textContent = 'Processing...';
-        submitBtn.disabled = false;
-      }
-    });
-
-    // Load collections
-    async function loadCollections() {
-      try {
-        const response = await fetch('/v1/collections');
-        const data = await response.json();
-
-        const grid = document.getElementById('collectionsGrid');
-        const empty = document.getElementById('collectionsEmpty');
-
-        if (!data.collections || data.collections.length === 0) {
-          grid.innerHTML = '';
-          empty.classList.remove('hidden');
-          return;
-        }
-
-        empty.classList.add('hidden');
-        grid.innerHTML = '';
-
-        data.collections.forEach(col => {
-          const card = document.createElement('div');
-          card.className = 'border border-gray-200 rounded p-3 hover:border-blue-400 hover:shadow-sm transition cursor-pointer';
-
-          const date = new Date(col.processed_date);
-          const dateStr = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-
-          card.innerHTML = \`
-            <h3 class="text-sm font-medium text-gray-900 mb-1 truncate">\${col.filename}</h3>
-            <div class="text-xs text-gray-500 space-y-0.5">
-              <div>\${dateStr}</div>
-              <div>\${col.duration_sec ? col.duration_sec.toFixed(0) : '?'}s · \${col.speaker_count} spk</div>
-            </div>
-          \`;
-
-          card.addEventListener('click', () => loadCollection(col.id));
-          grid.appendChild(card);
-        });
-      } catch (err) {
-        error.textContent = 'Error loading collections: ' + err.message;
-        error.classList.remove('hidden');
-      }
-    }
-
-    // Load specific collection
-    async function loadCollection(id) {
-      try {
-        const response = await fetch(\`/v1/collections/\${id}\`);
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to load collection');
-        }
-
-        currentCollectionId = id;
-        displayResults(data, id);
-      } catch (err) {
-        error.textContent = 'Error loading collection: ' + err.message;
-        error.classList.remove('hidden');
-      }
-    }
-
-    // Display results with speaker colors and renaming
-    function displayResults(data, collectionId) {
-      currentData = data;
-      currentCollectionId = collectionId;
-      speakerNames = data.speaker_names || {};
-
-      // Metadata
-      document.getElementById('duration').textContent = data.duration_sec ? data.duration_sec.toFixed(0) : '?';
-      document.getElementById('detectedLang').textContent = data.asr?.language || '?';
-
-      const speakers = new Set(data.aligned.speaker_segments.map(s => s.speaker));
-      document.getElementById('speakerCount').textContent = speakers.size;
-
-      // Transcript with colors and editable names
-      const transcript = document.getElementById('transcript');
-      transcript.innerHTML = '';
-
-      data.aligned.speaker_segments.forEach((seg, idx) => {
-        const div = document.createElement('div');
-        const colors = SPEAKER_COLORS[seg.speaker] || SPEAKER_COLORS['SPEAKER_00'];
-
-        div.className = 'transcript-segment pl-3 py-2 border-l-2 transition-all duration-200 cursor-pointer hover:border-l-4 hover:bg-opacity-30';
-        div.style.borderColor = colors.border;
-        div.setAttribute('data-segment-idx', idx);
-        div.setAttribute('data-start-time', seg.start);
-
-        // Add hover background color
-        div.addEventListener('mouseenter', () => {
-          div.style.backgroundColor = colors.bg;
-        });
-        div.addEventListener('mouseleave', () => {
-          // Only remove background if not currently active
-          if (!div.classList.contains('bg-blue-50')) {
-            div.style.backgroundColor = '';
-          }
-        });
-
-        const displayName = speakerNames[seg.speaker] || seg.speaker;
-
-        div.innerHTML = \`
-          <div class="flex items-baseline gap-2 mb-1">
-            <span class="text-xs font-semibold speaker-name hover:underline cursor-pointer"
-                  style="color: \${colors.text}; background-color: \${colors.bg}; padding: 1px 6px; border-radius: 3px;"
-                  data-speaker="\${seg.speaker}"
-                  data-idx="\${idx}">
-              \${displayName}
-            </span>
-            <span class="text-xs text-gray-400">\${seg.start.toFixed(1)}s</span>
-          </div>
-          <p class="text-sm text-gray-800 leading-relaxed">\${seg.text || '(silence)'}</p>
-        \`;
-
-        transcript.appendChild(div);
-      });
-
-      // Add double-click listeners for renaming
-      document.querySelectorAll('.speaker-name').forEach(el => {
-        el.addEventListener('dblclick', (e) => {
-          e.stopPropagation(); // Prevent segment click when double-clicking speaker name
-          const speaker = e.target.getAttribute('data-speaker');
-          const currentName = speakerNames[speaker] || speaker;
-          const newName = prompt(\`Rename \${currentName}:\`, currentName);
-
-          if (newName && newName.trim() && newName !== currentName) {
-            speakerNames[speaker] = newName.trim();
-            // Update all occurrences in UI
-            document.querySelectorAll(\`[data-speaker="\${speaker}"]\`).forEach(span => {
-              span.textContent = newName.trim();
-            });
-            // Show save button
-            document.getElementById('saveNamesBtn').classList.remove('hidden');
-          }
-        });
-      });
-
-      // Add click listeners to segments for audio seeking
-      document.querySelectorAll('.transcript-segment').forEach(el => {
-        el.addEventListener('click', (e) => {
-          // Don't seek if clicking on speaker name (for renaming)
-          if (e.target.classList.contains('speaker-name')) return;
-
-          const startTime = parseFloat(el.getAttribute('data-start-time'));
-          if (audioElement && isAudioLoaded && !isNaN(startTime)) {
-            audioElement.currentTime = startTime;
-            // Auto-play if not already playing
-            if (audioElement.paused) {
-              audioElement.play();
-              const playIcon = document.getElementById('playIcon');
-              playIcon.innerHTML = '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>';
-            }
-          }
-        });
-      });
-
-      // Raw JSON
-      document.getElementById('rawJson').textContent = JSON.stringify(data, null, 2);
-
-      results.classList.remove('hidden');
-
-      // Show save button if viewing a collection
-      if (collectionId) {
-        document.getElementById('saveNamesBtn').classList.remove('hidden');
-      } else {
-        document.getElementById('saveNamesBtn').classList.add('hidden');
-      }
-
-      // Load audio if viewing a collection
-      if (collectionId) {
-        loadAudio(collectionId);
-      }
-    }
-
-    // Format time in MM:SS format
-    function formatTime(seconds) {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      return \`\${mins}:\${secs.toString().padStart(2, '0')}\`;
-    }
-
-    // Load audio file for playback
-    async function loadAudio(collectionId) {
-      if (!collectionId) return;
-
-      const loading = document.getElementById('audioLoading');
-      loading.classList.remove('hidden');
-
-      try {
-        const response = await fetch(\`/v1/collections/\${collectionId}/audio\`);
-        if (!response.ok) throw new Error('Audio not found');
-
-        const blob = await response.blob();
-        const audioUrl = URL.createObjectURL(blob);
-
-        audioElement = document.getElementById('audioElement');
-        audioElement.src = audioUrl;
-        audioElement.load();
-
-        audioElement.addEventListener('loadedmetadata', () => {
-          const seeker = document.getElementById('audioSeeker');
-          seeker.max = audioElement.duration;
-          document.getElementById('totalTime').textContent = formatTime(audioElement.duration);
-          document.getElementById('audioPlayer').classList.remove('hidden');
-          isAudioLoaded = true;
-          loading.classList.add('hidden');
-
-          // Setup sticky audio bar observer
-          setupStickyAudioBar();
-        });
-
-        // Update UI during playback
-        audioElement.addEventListener('timeupdate', handleTimeUpdate);
-      } catch (err) {
-        loading.classList.add('hidden');
-        console.error('Failed to load audio:', err);
-      }
-    }
-
-    // Handle audio time updates and auto-scroll
-    function handleTimeUpdate() {
-      const currentTime = audioElement.currentTime;
-
-      // Update seeker and time display
-      document.getElementById('audioSeeker').value = currentTime;
-      document.getElementById('currentTime').textContent = formatTime(currentTime);
-
-      // Find current segment based on audio time
-      const segments = currentData.aligned.speaker_segments;
-      let foundIndex = -1;
-
-      for (let i = 0; i < segments.length; i++) {
-        if (currentTime >= segments[i].start && currentTime < segments[i].end) {
-          foundIndex = i;
-          break;
-        }
-      }
-
-      // Highlight and scroll to current segment
-      if (foundIndex !== currentSegmentIndex && foundIndex !== -1) {
-        currentSegmentIndex = foundIndex;
-
-        // Remove previous highlight
-        document.querySelectorAll('.transcript-segment').forEach(el => {
-          el.classList.remove('bg-blue-50', 'bg-opacity-50');
-        });
-
-        // Add highlight to current segment
-        const currentSegment = document.querySelectorAll('.transcript-segment')[foundIndex];
-        if (currentSegment) {
-          currentSegment.classList.add('bg-blue-50', 'bg-opacity-50');
-          currentSegment.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }
-    }
-
-    // Play/Pause button
-    document.getElementById('playBtn').addEventListener('click', () => {
-      if (!audioElement || !isAudioLoaded) return;
-
-      const playIcon = document.getElementById('playIcon');
-      if (audioElement.paused) {
-        audioElement.play();
-        // Change to pause icon
-        playIcon.innerHTML = '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>';
-      } else {
-        audioElement.pause();
-        // Change to play icon
-        playIcon.innerHTML = '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>';
-      }
-    });
-
-    // Audio seeker control
-    document.getElementById('audioSeeker').addEventListener('input', (e) => {
-      if (!audioElement || !isAudioLoaded) return;
-      audioElement.currentTime = e.target.value;
-    });
-
-    // Playback speed control
-    document.getElementById('playbackSpeed').addEventListener('change', (e) => {
-      if (!audioElement || !isAudioLoaded) return;
-      audioElement.playbackRate = parseFloat(e.target.value);
-    });
-
-    // Save speaker names
-    document.getElementById('saveNamesBtn').addEventListener('click', async () => {
-      if (!currentCollectionId) return;
-
-      try {
-        const response = await fetch(\`/v1/collections/\${currentCollectionId}/speaker-names\`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ speaker_names: speakerNames })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to save speaker names');
-        }
-
-        // Show success feedback
-        const btn = document.getElementById('saveNamesBtn');
-        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Saved</span>';
-        btn.classList.remove('bg-green-600', 'hover:bg-green-700');
-        btn.classList.add('bg-gray-300');
-        setTimeout(() => {
-          btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg><span>Save</span>';
-          btn.classList.remove('bg-gray-300');
-          btn.classList.add('bg-green-600', 'hover:bg-green-700');
-          btn.classList.add('hidden');
-        }, 1500);
-
-      } catch (err) {
-        error.textContent = 'Error saving speaker names: ' + err.message;
-        error.classList.remove('hidden');
-      }
-    });
-  </script>
-</body>
-</html>`);
+// Web UI - Serves React app with live reload
+app.get("/app", async (c) => {
+  let html = await Bun.file("src/index.html").text();
+
+  // Inject YouTube API key if configured (optional feature)
+  const youtubeApiKey = process.env.YOUTUBE_API_KEY || '';
+  if (youtubeApiKey) {
+    const script = `<script>window.YOUTUBE_API_KEY = "${youtubeApiKey}";</script>`;
+    html = html.replace('</head>', `${script}\n  </head>`);
+  }
+
+  return c.html(html);
 });
 
 // Health check endpoint - verifies Python scripts exist before processing requests
@@ -999,6 +482,52 @@ app.get("/v1/health", async (c) => {
   });
 });
 
+// File duration endpoint - extracts duration from uploaded audio/video file
+// Why: Needed for audio trimmer UI to show total duration before processing
+// Uses ffprobe to read file metadata without full conversion
+app.post("/v1/file/duration", async (c) => {
+  try {
+    const form = await c.req.parseBody();
+    const file = form["file"];
+
+    if (!file) {
+      return c.json({ error: "file is required" }, 400);
+    }
+
+    // Save file to temp location for ffprobe
+    const tmpFile = path.join(os.tmpdir(), `duration-check-${nanoid()}`);
+    try {
+      await Bun.write(tmpFile, (file as File));
+
+      // Use ffprobe to extract duration
+      const ffprobeResult = await new Promise<string>((resolve, reject) => {
+        exec(
+          `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${tmpFile}"`,
+          (error, stdout, stderr) => {
+            if (error) {
+              reject(new Error(`ffprobe error: ${stderr || error.message}`));
+            } else {
+              resolve(stdout.trim());
+            }
+          }
+        );
+      });
+
+      const duration = parseFloat(ffprobeResult);
+      if (isNaN(duration)) {
+        throw new Error('Could not parse duration from file');
+      }
+
+      return c.json({ duration_seconds: duration });
+    } finally {
+      // Clean up temp file
+      await fs.unlink(tmpFile).catch(() => {});
+    }
+  } catch (err) {
+    return c.json({ error: `Duration extraction failed: ${(err as Error).message}` }, 500);
+  }
+});
+
 // Main processing endpoint - orchestrates entire pipeline: upload → preprocess → ML → align
 // Why: Single endpoint simplifies client integration; all processing happens server-side
 // Flow: multipart upload → temp storage → ffmpeg conversion → parallel ASR+diarization → alignment
@@ -1011,6 +540,7 @@ app.post("/v1/process", async (c) => {
   const form = await c.req.parseBody();
   const file = form["file"];
   const youtubeUrl = form["youtube_url"] as string | undefined;
+  const customName = form["name"] as string | undefined;
 
   // Validate: require either file OR youtube_url (not both, not neither)
   if (!file && !youtubeUrl) {
@@ -1044,6 +574,14 @@ app.post("/v1/process", async (c) => {
     form["enable_overlap"] != null
       ? String(form["enable_overlap"]).toLowerCase() === "true"
       : true;
+  const startTime =
+    form["start_time"] != null && String(form["start_time"]).length > 0
+      ? Number(form["start_time"])
+      : undefined;
+  const endTime =
+    form["end_time"] != null && String(form["end_time"]).length > 0
+      ? Number(form["end_time"])
+      : undefined;
 
   // Create isolated temp directory per request using nanoid for uniqueness
   // Why: Prevents file conflicts in concurrent requests; automatic cleanup on completion
@@ -1066,12 +604,16 @@ app.post("/v1/process", async (c) => {
   debug("TEMP", "Directory created", { path: tmpDir, id }, 3);
 
   // Branch: Download from YouTube OR stream uploaded file
+  let transcriptAvailable = false;
+  let videoTitle: string | undefined;
   if (youtubeUrl) {
     // Download YouTube audio directly to WAV format
     debug("YOUTUBE", "Starting download", { url: youtubeUrl.substring(0, 50) }, 5);
     try {
-      await callYoutubeDownloadScript(youtubeUrl, outWav);
-      debug("YOUTUBE", "Download complete", {}, 10);
+      const downloadResult = await callYoutubeDownloadScript(youtubeUrl, outWav, startTime, endTime, true);
+      transcriptAvailable = downloadResult.transcriptAvailable;
+      videoTitle = downloadResult.videoTitle;
+      debug("YOUTUBE", "Download complete", { transcript_available: transcriptAvailable }, 10);
     } catch (err) {
       debug("YOUTUBE", "Download failed", { error: String(err) });
       return c.json({ error: `YouTube download failed: ${String(err)}` }, 500);
@@ -1110,29 +652,90 @@ app.post("/v1/process", async (c) => {
       // Why: ML models require consistent input format; ffmpeg handles all conversions
       debug("PREPROCESS", "Starting audio conversion to 16kHz mono WAV", {}, 8);
       await runFfmpegToWav16kMono(srcPath, outWav);
+
+      // If trimming is enabled for uploaded files, crop the WAV file
+      if (startTime !== undefined || endTime !== undefined) {
+        const trimmedPath = path.join(tmpDir, "trimmed.wav");
+        debug("PREPROCESS", "Trimming audio", { start: startTime, end: endTime }, 9);
+
+        let ffmpegCmd = `ffmpeg -i "${outWav}"`;
+        if (startTime !== undefined && startTime > 0) {
+          ffmpegCmd += ` -ss ${startTime}`;
+        }
+        if (endTime !== undefined) {
+          ffmpegCmd += ` -to ${endTime}`;
+        }
+        ffmpegCmd += ` -c copy "${trimmedPath}"`;
+
+        await new Promise<void>((resolve, reject) => {
+          exec(ffmpegCmd, (error, stdout, stderr) => {
+            if (error) {
+              debug("PREPROCESS", "Trimming failed", { error: stderr.substring(0, 200) });
+              reject(new Error(`Audio trimming failed: ${stderr}`));
+            } else {
+              debug("PREPROCESS", "Trimming complete", {}, 10);
+              resolve();
+            }
+          });
+        });
+
+        // Replace the original WAV with the trimmed version
+        await fs.rename(trimmedPath, outWav);
+      }
     }
 
     // Get duration (YouTube download already in WAV format, file upload converted above)
     const duration = (await getDurationSec(outWav)) ?? null;
     debug("PREPROCESS", youtubeUrl ? "YouTube audio ready" : "Audio conversion complete", { duration_sec: duration }, 12);
 
-    // Key optimization: Run ASR and diarization in parallel (both read same WAV file)
-    // Why: Saves ~50% processing time since operations are independent
-    // Both use CPU-only inference, so no GPU contention
-    debug("PIPELINE", "Starting parallel processing (ASR + diarization)", { diarization: "pyannote", asr: asrModel }, 15);
-    const parallelStart = Date.now();
+    // Check if transcript file exists for YouTube URLs
+    const transcriptPath = outWav + '.transcript.json';
+    const hasTranscript = transcriptAvailable &&
+                          await fs.access(transcriptPath).then(() => true).catch(() => false);
 
-    const [diarSegments, asrResult] = await Promise.all([
-      callDiarizationScript(outWav, {
-        max_speakers: maxSpeakers,
-        min_speaker_duration: minSpeakerDuration,
-        enable_overlap: enableOverlap,
-      }),
-      transcribeWithWhisper(outWav, { model: asrModel, language }),
-    ]);
+    let diarSegments: DiarSeg[];
+    let asrResult: any;
 
-    const parallelElapsed = Date.now() - parallelStart;
-    debug("PIPELINE", "Parallel processing complete", { elapsed_ms: parallelElapsed }, 75);
+    if (hasTranscript) {
+      // SKIP ASR - use transcript instead with optimized diarization
+      debug("TRANSCRIPT", "Using YouTube transcript (skipping ASR)", {}, 12);
+      debug("PIPELINE", "Starting optimized diarization for YouTube", { diarization: "pyannote (optimized)" }, 15);
+      const parallelStart = Date.now();
+
+      // Run diarization with optimized settings and load transcript in parallel
+      [diarSegments, asrResult] = await Promise.all([
+        callDiarizationScript(outWav, {
+          max_speakers: maxSpeakers,
+          ...OPTIMIZED_DIARIZATION_OPTIONS,
+        }),
+        loadTranscriptAsASR(transcriptPath),
+      ]);
+
+      const parallelElapsed = Date.now() - parallelStart;
+      debug("PIPELINE", "Processing complete (transcript + optimized diarization)", { elapsed_ms: parallelElapsed }, 75);
+    } else {
+      // Fallback to ASR + standard diarization
+      if (youtubeUrl && !hasTranscript) {
+        debug("TRANSCRIPT", "No transcript available, using Whisper", { model: asrModel }, 12);
+      }
+      // Key optimization: Run ASR and diarization in parallel (both read same WAV file)
+      // Why: Saves ~50% processing time since operations are independent
+      // Both use CPU-only inference, so no GPU contention
+      debug("PIPELINE", "Starting parallel processing (ASR + diarization)", { diarization: "pyannote", asr: asrModel }, 15);
+      const parallelStart = Date.now();
+
+      [diarSegments, asrResult] = await Promise.all([
+        callDiarizationScript(outWav, {
+          max_speakers: maxSpeakers,
+          min_speaker_duration: minSpeakerDuration,
+          enable_overlap: enableOverlap,
+        }),
+        transcribeWithWhisper(outWav, { model: asrModel, language }),
+      ]);
+
+      const parallelElapsed = Date.now() - parallelStart;
+      debug("PIPELINE", "Parallel processing complete", { elapsed_ms: parallelElapsed }, 75);
+    }
 
     // Sort by timestamp for chronological order, then align words to speakers
     debug("ALIGN", "Starting word-to-speaker alignment", {}, 78);
@@ -1142,8 +745,13 @@ app.post("/v1/process", async (c) => {
     debug("ALIGN", "Alignment complete", { speaker_segments: aligned.length }, 82);
 
     const totalElapsed = Date.now() - requestStart;
+    // Determine final name (priority: custom > video title > filename)
+    const finalName = customName || videoTitle || filename;
+
     const responsePayload = {
       file: (c.req.header("x-filename") as string) || filename || "upload",
+      name: finalName,
+      youtube_url: youtubeUrl || null,
       duration_sec: duration,
       sample_rate: 16000,
       diarization: { segments: diarSegments },
@@ -1200,6 +808,14 @@ app.post("/v1/process", async (c) => {
       outWav,
       path.join(cacheDir, "audio.wav")
     );
+    // Save transcript if it was used
+    if (hasTranscript && await fs.access(transcriptPath).then(() => true).catch(() => false)) {
+      await fs.copyFile(
+        transcriptPath,
+        path.join(cacheDir, "transcript.json")
+      );
+      debug("CACHE", "Transcript saved", { path: path.join(cacheDir, "transcript.json") });
+    }
 
     debug("CACHE", "Outputs saved", { path: cacheDir }, 95);
 
@@ -1252,6 +868,8 @@ app.get("/v1/collections", async (c) => {
         collections.push({
           id: entry.name,
           filename: data.file || "unknown",
+          name: data.name || data.file || "unknown",
+          youtube_url: data.youtube_url || null,
           processed_date: processedDate?.toISOString() || null,
           duration_sec: data.duration_sec || null,
           speaker_count: speakers.size,

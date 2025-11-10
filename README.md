@@ -1,310 +1,209 @@
 # SpeakSlice
 
-**FREE, CPU-first speaker diarization and transcription service**
+CPU-first speaker diarization and transcription service (free, no GPU required)
 
-SpeakSlice takes audio files (mp3/mp4/wav) and returns:
-- Speaker diarization segments with timestamps (SPEAKER_00, SPEAKER_01, etc.)
-- Word-level transcripts with confidence scores
-- Per-segment transcripts aligned to speakers
+## Core Capabilities
 
-## Table of Contents
-- [Features](#features)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [API Endpoints](#api-endpoints)
-- [Web UI](#web-ui)
-- [Project Structure](#project-structure)
-- [Dependencies](#dependencies)
-- [Constraints](#constraints)
-- [Performance](#performance)
-- [Development](#development)
-- [Testing](#testing)
-- [License](#license)
-
-## Features
-
-- **Free & CPU-optimized**: No paid services or GPU requirements
-- **High-performance**: Optimized for speed with 80-90% faster processing vs baseline
-  - 6-min audio: ~3-5 mins total (vs 40-50 mins baseline)
-  - Uses distil-whisper models and CPU batch optimization
-- **Simple architecture**: Single-process Hono API that spawns Python CLI scripts
+- **Speaker diarization + ASR**: pyannote (diarization) + faster-whisper (transcription)
+- **High performance**: 3-5min for 6min audio (80-90% faster than baseline via distil-whisper + CPU batch optimization)
 - **Parallel processing**: ASR and diarization run concurrently
-- **Docker support**: One command to run everything
-- **Flexible models**: Choose from tiny/base/small/medium Whisper models
-- **Web UI**: Built-in testing interface at `/app` with Tailwind styling
-- **YouTube support**: Download and process videos with time-based cropping
-- **Progress logging**: Real-time progress updates during transcription and diarization
-- **Output persistence**: All outputs saved to `cache/YYYYMMDD-HHmm/` for later analysis
+- **YouTube video embedding**: Videos play inline with synchronized transcript highlighting
+- **Custom naming**: Name your transcripts for better organization in collections
+- **YouTube optimization**: Auto-fetches transcripts + video metadata, skips ASR when available (60% speedup)
+- **Output persistence**: All results saved to `cache/YYYYMMDD-HHmm/` with intermediate files
+- **Flexible models**: tiny/base/small/medium Whisper variants
+- **Web UI**: React + TypeScript interface with hot reloading
+- **Docker support**: Single-command deployment
 
 ## Architecture
 
-This is NOT a microservices architecture. It's a single-process Hono API (TypeScript/Bun) that spawns Python CLI scripts per request:
+Single-process Hono API (TypeScript/Bun) that spawns Python CLI scripts per request:
 
 ```
-Client → Hono API → ffmpeg (preprocess) → spawn diarize.py + transcribe.py (parallel)
-                                        ↓
-                                   parse stdout → align → return JSON
+Client → React UI → Hono API → ffmpeg (preprocess) → spawn diarize.py + transcribe.py (parallel)
+                                                    ↓
+                                               parse stdout → align → return JSON
 ```
 
-**TypeScript Layer**: Hono API server that orchestrates the pipeline
-**Python Layer**: CLI scripts for diarization (pyannote) and ASR (faster-whisper)
+**Layers:**
+- Frontend: React + TypeScript SPA with Tailwind CSS
+- TypeScript: Hono API server (orchestration)
+- Python: CLI scripts for diarization (pyannote) and ASR (faster-whisper)
 
-## Quick Start
+**YouTube optimization:** When transcript available → skip ASR → use optimized diarization settings (60% faster)
 
-### Prerequisites
+## Requirements
 
-- Bun (for TypeScript runtime)
+**Environment:**
+- `HF_TOKEN` in `.env` - **BOTH licenses required**:
+  - https://huggingface.co/pyannote/speaker-diarization-3.1
+  - https://huggingface.co/pyannote/segmentation-3.0
+- `YOUTUBE_API_KEY` in `.env` (optional, for video metadata only)
+
+**System:**
+- Bun (TypeScript runtime)
 - Python 3.10+
 - ffmpeg
-- uv (for Python package management - https://docs.astral.sh/uv/)
-- **Hugging Face account** (free) for pyannote model access
+- uv (Python package manager)
 
-### Setup Hugging Face Token (Required)
-
-Pyannote speaker diarization requires a **free** Hugging Face account:
-
-1. **Create free account**: https://huggingface.co/join
-
-2. **Accept model licenses** (one-time) - **BOTH required**:
-   - Primary pipeline: https://huggingface.co/pyannote/speaker-diarization-3.1
-   - Segmentation model: https://huggingface.co/pyannote/segmentation-3.0
-   - Click "Agree and access repository" on BOTH pages
-   - ⚠️ **Missing the segmentation license causes**: `'NoneType' object has no attribute 'eval'` error
-
-3. **Create access token**: https://huggingface.co/settings/tokens
-   - Click "New token" → "Read" access is sufficient
-
-4. **Create `.env` file**:
-   ```bash
-   cp .env.example .env
-   # Then edit .env and add your token:
-   # HF_TOKEN=your_token_here
-   ```
-
-**Note**: This is 100% FREE - no paid tier required, just authentication to track license acceptance.
-
-### Local Development
-
+**Setup:**
 ```bash
-# Create virtual environment
-uv venv
-
-# Activate virtual environment
-source .venv/bin/activate  # On Unix/macOS
-# or
-.venv\Scripts\activate  # On Windows
-
-# Install Python dependencies
+cp .env.example .env  # Add HF_TOKEN and optionally YOUTUBE_API_KEY
+uv venv && source .venv/bin/activate
 uv pip install -r requirements.txt
-
-# Install Bun dependencies
 bun install
-
-# Create .env file with your HF token
-cp .env.example .env
-# Edit .env and set HF_TOKEN=your_token_here
-
-# Run server
-bun run dev
+bun run dev  # http://localhost:8000
 ```
 
-### Docker (Recommended)
-
+**Docker:**
 ```bash
-# Create .env file with your HF token (docker-compose will use it)
-cp .env.example .env
-# Edit .env and set HF_TOKEN=your_token_here
-
-# Build and run (docker-compose reads HF_TOKEN from .env)
+cp .env.example .env  # Add tokens
 docker compose up --build
-
-# Server will be available at http://localhost:8000
 ```
 
 ## API Endpoints
 
-### Health Check
+### GET /v1/health
 
 ```bash
 curl http://localhost:8000/v1/health
 ```
 
-Response:
+**Response:**
 ```json
 {
   "status": "ok",
-  "scripts": {
-    "diarization": "found",
-    "transcription": "found"
-  },
-  "models": {
-    "diarization": "pyannote/speaker-diarization-3.1",
-    "asr": "faster-whisper-medium"
-  }
+  "scripts": {"diarization": "found", "transcription": "found"},
+  "models": {"diarization": "pyannote/speaker-diarization-3.1", "asr": "faster-whisper-medium"}
 }
 ```
 
-### Process Audio
+### POST /v1/process
 
 ```bash
 curl -X POST http://localhost:8000/v1/process \
   -F "file=@audio.mp4" \
+  -F "name=My Interview Recording" \
   -F "asr_model=medium" \
   -F "language=auto" \
   -F "max_speakers=3" \
   -F "min_speaker_duration=0.5" \
   -F "enable_overlap=true"
+
+# Or with YouTube URL
+curl -X POST http://localhost:8000/v1/process \
+  -F "youtube_url=https://www.youtube.com/watch?v=..." \
+  -F "name=Custom Name (optional, auto-fills from video title)" \
+  -F "asr_model=medium"
 ```
 
 **Parameters:**
-- `file` (required): Audio file (mp3/mp4/wav, max 2GB)
-- `asr_model` (optional): Whisper model size - "tiny", "base", "small", "medium" (default: "medium")
-- `language` (optional): ISO language code or "auto" (default: "auto")
-- `max_speakers` (optional): Maximum number of speakers to detect
-- `min_speaker_duration` (optional): Minimum speaker segment duration in seconds (default: 0.5)
+- `file` (one of file/youtube_url required): Audio file (mp3/mp4/wav, max 2GB)
+- `youtube_url` (one of file/youtube_url required): YouTube video URL
+- `name` (optional): Custom name for this transcript (auto-fills from YouTube title if not provided)
+- `asr_model` (optional): "tiny", "base", "small", "medium" (default: "medium")
+- `language` (optional): ISO code or "auto" (default: "auto")
+- `max_speakers` (optional): Maximum speakers to detect
+- `min_speaker_duration` (optional): Min segment duration in seconds (default: 0.5)
 - `enable_overlap` (optional): Enable overlap detection (default: true)
 
-**Response:**
+**Response Schema:**
 ```json
 {
   "file": "audio.mp4",
+  "name": "My Interview Recording",
+  "youtube_url": "https://www.youtube.com/watch?v=..." or null,
   "duration_sec": 120.5,
   "sample_rate": 16000,
   "diarization": {
-    "segments": [
-      {
-        "start": 0.5,
-        "end": 5.2,
-        "speaker": "SPEAKER_00",
-        "has_overlap": false
-      }
-    ]
+    "segments": [{"start": 0.5, "end": 5.2, "speaker": "SPEAKER_00", "has_overlap": false}]
   },
   "asr": {
     "language": "en",
-    "words": [
-      {
-        "start": 0.5,
-        "end": 0.8,
-        "text": "Hello",
-        "confidence": 0.98
-      }
-    ],
-    "segments": [
-      {
-        "start": 0.5,
-        "end": 5.2,
-        "text": "Hello, how are you?",
-        "avg_confidence": 0.95
-      }
-    ]
+    "words": [{"start": 0.5, "end": 0.8, "text": "Hello", "confidence": 0.98}],
+    "segments": [{"start": 0.5, "end": 5.2, "text": "Hello, how are you?", "avg_confidence": 0.95}]
   },
   "aligned": {
     "speaker_segments": [
-      {
-        "start": 0.5,
-        "end": 5.2,
-        "speaker": "SPEAKER_00",
-        "text": "Hello, how are you?",
-        "words": [...]
-      }
+      {"start": 0.5, "end": 5.2, "speaker": "SPEAKER_00", "text": "Hello, how are you?", "words": [...]}
     ]
   },
   "meta": {
-    "models": {
-      "diarization": "pyannote/speaker-diarization-3.1",
-      "asr": "whisper-medium"
-    }
+    "models": {"diarization": "pyannote/speaker-diarization-3.1", "asr": "whisper-medium"}
   }
 }
 ```
 
 **Output Persistence:**
-All processing outputs are automatically saved to timestamped directories:
-- Location: `cache/YYYYMMDD-HHmm/` (e.g., `cache/20251106-1830/`)
-- Files saved:
-  - `audio.wav` - Preprocessed audio (16kHz mono WAV)
-  - `diarization.json` - Speaker segments
-  - `asr.json` - Transcription with words and segments
-  - `aligned.json` - Speaker-aligned transcript
-  - `response.json` - Complete API response (includes speaker_names)
 
-## Web UI
+All outputs saved to timestamped directories: `cache/YYYYMMDD-HHmm/`
 
-Access the interactive web interface at `http://localhost:8000/app` for a complete audio processing experience.
+Files:
+- `audio.wav` - Preprocessed audio (16kHz mono WAV)
+- `diarization.json` - Speaker segments
+- `asr.json` - Transcription with words and segments
+- `aligned.json` - Speaker-aligned transcript
+- `response.json` - Complete API response (includes `name`, `youtube_url`, `speaker_names`)
+- `transcript.json` - YouTube transcript (only for YouTube URLs with auto-captions)
 
-### Features
+## Performance
 
-**Two-Tab Interface:**
-- **Upload Tab**: Process new audio files with configurable options
-- **Collections Tab**: Browse and review previously processed files
+**Processing Speed (6-minute audio):**
+- Baseline: 40-50 minutes total
+- Optimized: 3-5 minutes total (80-90% faster)
+  - ASR: 2-3 minutes (0.3-0.5x real-time)
+  - Diarization: 1-2 minutes (1.5-2x real-time)
 
-**File Upload & Processing:**
-- Drag-and-drop or click to upload MP3/MP4/WAV files (max 2GB)
-- Configure ASR model (tiny/base/small/medium), language, and max speakers
-- Live processing status with animated loader
-- Results display with speaker-segmented transcript
+**YouTube with transcript:**
+- Standard: ~230s
+- Optimized: ~90s (60% faster)
 
-**Collections Management:**
-- Grid view of all processed files with metadata
-- Shows filename, date, duration, and speaker count
-- Click any collection to load audio and transcript
-- Persistent storage in `cache/` directory
+**Optimizations:**
+- ASR: Fast mode (`beam_size=1`), distil-whisper models, CPU thread optimization
+- Diarization: Batch size 32 (vs 1-4 default), explicit CPU config
+- YouTube: Skip ASR when transcript available, optimized diarization settings
 
-### Interactive Components
+**Debug mode:** `bun run dev:debug` shows `[TIMING]` and `[PROGRESS]` logs
 
-**Audio Bar** (Sticky Player):
-- **Always accessible**: Sticks to top of screen while scrolling through transcript
-- **Smooth transitions**: Enhanced UI when sticky (rounded corners, shadow, centered)
-- **Controls**:
-  - Play/pause button with animated SVG icons
-  - Time scrubber with current/total time display
-  - **Playback speed**: Dropdown selector (1x, 1.25x, 1.5x, 2x)
-  - Save button for speaker name changes
-- **Visual feedback**: Loading indicator for audio file
+## YouTube Pipeline Optimization
 
-**Speaker Snippets** (Interactive Transcript):
-- **Color-coded speakers**: Each speaker gets a consistent color (supports up to 10 speakers)
-- **Hover effects**: Border expands and background highlights on mouse over
-- **Click-to-seek**: Click any segment to jump audio to that timestamp (auto-plays)
-- **Active highlighting**: Currently playing segment highlighted with blue background
-- **Auto-scroll**: Transcript follows audio playback
-- **Speaker renaming**:
-  - Double-click any speaker name to rename
-  - Updates all occurrences in transcript
-  - Click "Save" to persist changes to collection
-- **Timestamps**: Each segment shows speaker name and start time
+**When transcript available:**
+1. Fetch auto-generated transcript via yt-dlp
+2. Skip ASR processing (saves 2-3 minutes)
+3. Use optimized diarization settings:
+   - `min_speaker_duration: 1.0` (vs 0.5 default)
+   - `enable_overlap: false` (vs true default)
+   - `batch_size: 64` (vs 32 default)
 
-### User Workflow
+**Limitations:**
+- Only works with videos that have auto-generated captions
+- Transcript accuracy depends on YouTube's quality
+- Word timestamps evenly distributed (not exact speech timing)
 
-1. **Upload & Process**: Upload audio → Configure options → Click "Process"
-2. **Review**: View speaker-segmented transcript with color coding
-3. **Navigate**: Click segments to jump to specific parts of audio
-4. **Customize**: Rename speakers (e.g., "SPEAKER_00" → "John")
-5. **Save**: Persist speaker names for future reference
-6. **Revisit**: Access processed files anytime via Collections tab
+**Implementation:** See `loadTranscriptAsASR()` and `OPTIMIZED_DIARIZATION_OPTIONS` in src/server.ts
 
 ## Project Structure
 
 ```
 speakslice/
 ├── src/
-│   ├── server.ts              # Hono API with /app UI and /v1 endpoints
+│   ├── app.tsx                # React UI (all components in one file)
+│   ├── index.html             # HTML shell with live reload script
+│   ├── server.ts              # Hono API with /app and /v1 endpoints
 │   ├── server.test.ts         # Bun unit tests
-│   ├── assets/                # SVG icons for web UI
-│   │   ├── play.svg          # Play button icon
-│   │   ├── pause.svg         # Pause button icon
-│   │   ├── save.svg          # Save button icon
-│   │   ├── loader.svg        # Loading spinner icon
-│   │   └── upload.svg        # Upload icon
+│   ├── assets/                # SVG icons (play, pause, save, loader, upload)
 │   └── scripts/
 │       ├── diarize.py         # Diarization CLI script (pyannote)
 │       ├── transcribe.py      # ASR CLI script (faster-whisper)
 │       └── download_youtube.py # YouTube download utility (yt-dlp)
+├── public/
+│   └── app.js                 # Built React bundle (auto-generated)
 ├── specs/
-│   └── prd.md                # Product requirements document
-├── test/                      # Test fixtures directory
-├── tsconfig.json             # TypeScript config
+│   ├── embed-youtube-video-and-name.md  # YouTube embedding feature spec
+│   └── youtube-transcript-integration.md # YouTube transcript optimization spec
+├── test/                      # Test fixtures
+├── tsconfig.json             # TypeScript config (with React JSX)
+├── eslint.config.js          # ESLint config (React + TypeScript)
 ├── package.json              # Bun dependencies
 ├── requirements.txt          # Python dependencies
 ├── Dockerfile                # Single container with Bun + Python
@@ -317,28 +216,29 @@ speakslice/
 │   │   ├── aligned.json      # Speaker-aligned transcript
 │   │   └── response.json     # Complete API response (includes speaker_names)
 │   └── hub/                   # HuggingFace model cache
-└── CLAUDE.md                 # Development guidelines
+├── CLAUDE.md                 # Development guidelines
+└── README.md                 # This file
 ```
 
-**Note**: The `cache/` directory serves dual purposes:
-- Model cache (`hub/`): ML models downloaded on first run
-- Output persistence (`YYYYMMDD-HHmm/`): Timestamped directories with processing results
+**Note:** `cache/` serves dual purposes - model cache (`hub/`) and output persistence (`YYYYMMDD-HHmm/`)
 
 ## Dependencies
 
-**Python** (CPU-optimized):
+**Python (CPU-optimized):**
 - `pyannote.audio==3.3.2` - Speaker diarization
 - `faster-whisper==1.0.3` - ASR with word timestamps
 - `torch==2.4.0` - CPU inference only
 - `huggingface-hub<1.0.0` - Pinned for pyannote compatibility
 - `uv` - Fast Python package manager
 
-**TypeScript**:
+**TypeScript/React:**
 - `hono` - API framework
+- `react` + `react-dom` - UI framework
 - `nanoid` - Request IDs
-- Bun runtime (includes Node.js APIs)
+- `eslint` + TypeScript plugins - Code quality
+- Bun runtime (includes Node.js APIs + bundler)
 
-**System**:
+**System:**
 - `ffmpeg` - Audio preprocessing
 - `python3` - Script execution
 
@@ -350,82 +250,32 @@ speakslice/
 - No paid APIs or services
 - Models cached after first run
 
-## Performance
+## Web UI
 
-SpeakSlice is optimized for speed while maintaining CPU-only operation:
+Access at `http://localhost:8000/app`
 
-### Processing Speed (6-minute audio)
-
-**Before optimization:**
-- ASR (tiny model): 25-30 minutes
-- Diarization: 15-20 minutes
-- **Total: 40-50 minutes**
-
-**After optimization:**
-- ASR (tiny/medium with distil): 2-3 minutes (0.3-0.5x real-time)
-- Diarization: 9-12 minutes (1.5-2x real-time)
-- **Total: 3-5 minutes (80-90% faster)**
-
-### Key Optimizations
-
-**ASR (Transcription):**
-- Fast mode enabled by default (`beam_size=1`, distil-whisper models)
-- CPU thread optimization (uses all available cores)
-- 5-6x speedup from distil-whisper for English audio
-- <3% accuracy trade-off (Word Error Rate increase)
-
-**Diarization:**
-- Increased batch sizes (32 vs 1-4 default)
-- Explicit CPU device configuration
-- 30-40% speedup with <1% accuracy impact
-
-**Monitoring:** Enable debug mode (`bun run dev:debug`) to see detailed timing logs with `[TIMING]` messages showing model load and inference times.
-
-See [CLAUDE.md](./CLAUDE.md) for detailed performance documentation and how to disable fast mode if needed.
+**Features:**
+- Two-tab interface: Upload (process new files) + Collections (browse previous)
+- Drag-and-drop file upload (MP3/MP4/WAV, max 2GB) OR YouTube URL input
+- Custom naming: Name your transcripts for better organization (auto-fills from YouTube titles)
+- YouTube video embedding: Videos play inline with synchronized transcript highlighting
+- Live processing status with animated loader
+- Speaker-segmented transcript with color coding
+- Interactive: click segments to seek video/audio, double-click speaker names to rename
+- Smart media player: YouTube iframe for videos, audio player for files
+- Playback speed control (1x/1.25x/1.5x/2x) for both video and audio
+- Collection cards with custom names and YouTube badges
+- Persistent storage in `cache/` directory
 
 ## Development
 
-See [CLAUDE.md](./CLAUDE.md) for detailed development guidelines and architecture documentation.
+See [CLAUDE.md](./CLAUDE.md) for detailed development guidelines, testing procedures, and architecture documentation.
 
-## Testing
-
-### Web UI (E2E Testing)
-The easiest way to test the complete pipeline:
-
-1. Start the server: `bun run dev`
-2. Open browser: `http://localhost:8000/app`
-3. Upload an audio file and verify results
-
-The web UI provides a complete interface for uploading files, configuring options, and viewing results with speaker-segmented transcripts.
-
-### Unit Tests
-Run Bun tests for TypeScript code:
-
+**Quick commands:**
 ```bash
-# Run all tests
-bun test
-
-# Watch mode
-bun test --watch
+bun run dev         # Start with hot reload
+bun run dev:debug   # With detailed logging
+bun run build       # Build React bundle
+bun run lint        # Run ESLint
+bun test            # Run unit tests
 ```
-
-### Python Script Tests
-Test Python scripts independently:
-
-```bash
-# Convert audio to 16kHz mono WAV first
-ffmpeg -i audio.mp4 -ac 1 -ar 16000 audio.wav
-
-# Test diarization
-python src/scripts/diarize.py audio.wav --max-speakers 3
-
-# Test transcription
-python src/scripts/transcribe.py audio.wav --model medium
-
-# Test YouTube download (requires yt-dlp and ffmpeg)
-python src/scripts/download_youtube.py "https://youtube.com/watch?v=VIDEO_ID" --output test.wav --start "0:30" --end "1:45"
-```
-
-## License
-
-MIT
