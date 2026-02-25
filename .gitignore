@@ -47,3 +47,5 @@ test/fixtures/*.mp4
 *.m4a
 *.mp3
 *.wav
+
+test-output/*

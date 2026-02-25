@@ -10,10 +10,24 @@ import json
 import argparse
 import os
 import time
+import wave
 # pyannote.audio: State-of-the-art speaker diarization using deep learning
 # Why: Free, CPU-compatible, pre-trained models with good accuracy on meeting audio
 from pyannote.audio import Pipeline
 import torch
+
+
+def get_audio_duration(wav_path):
+    """Get duration of WAV file in seconds."""
+    try:
+        with wave.open(wav_path, 'rb') as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            duration = frames / float(rate)
+            return duration
+    except Exception as e:
+        print(f"[PROGRESS] Could not get audio duration: {e}", file=sys.stderr, flush=True)
+        return None
 
 
 def main():
@@ -83,6 +97,15 @@ def main():
     model_load_time = time.time() - model_load_start
     print(f"[TIMING] Model load: {model_load_time:.2f}s", file=sys.stderr, flush=True)
 
+    # Get audio duration for progress estimation
+    audio_duration = get_audio_duration(args.wav_path)
+    if audio_duration:
+        duration_mins = audio_duration / 60
+        # Rough estimate: diarization takes 0.5-1x real-time on CPU
+        estimated_time = audio_duration * 0.75  # 0.75x multiplier for mid-range estimate
+        print(f"[PROGRESS] Audio duration: {duration_mins:.1f} minutes ({audio_duration:.1f} seconds)", file=sys.stderr, flush=True)
+        print(f"[PROGRESS] Estimated processing time: {estimated_time:.1f}s (may vary based on CPU)", file=sys.stderr, flush=True)
+
     # Configure diarization parameters based on input
     # num_speakers: exact count (if known), or min_speakers/max_speakers for bounds
     # Note: min_speaker_duration is NOT a pipeline parameter in pyannote 3.x
@@ -90,12 +113,17 @@ def main():
     if args.max_speakers:
         diar_params["max_speakers"] = args.max_speakers
 
-    print(f"[PROGRESS] Starting diarization on {args.wav_path}...", file=sys.stderr, flush=True)
+    print(f"[PROGRESS] Starting diarization inference on {args.wav_path}...", file=sys.stderr, flush=True)
+    print(f"[PROGRESS] Running speaker segmentation and embedding extraction...", file=sys.stderr, flush=True)
+    print(f"[PROGRESS] This may take a few minutes for long audio files...", file=sys.stderr, flush=True)
+
     # Run diarization inference - CPU-only, returns Annotation object
     inference_start = time.time()
     diar = pipeline(args.wav_path, **diar_params)
     inference_time = time.time() - inference_start
-    print("[PROGRESS] Diarization inference complete, processing segments...", file=sys.stderr, flush=True)
+
+    print("[PROGRESS] Diarization inference complete!", file=sys.stderr, flush=True)
+    print("[PROGRESS] Processing and organizing speaker segments...", file=sys.stderr, flush=True)
     print(f"[TIMING] Inference: {inference_time:.2f}s", file=sys.stderr, flush=True)
 
     # Convert pyannote Annotation to simple JSON format for TypeScript parsing

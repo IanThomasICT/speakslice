@@ -33,6 +33,7 @@ import re
 import shlex
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 
 def validate_youtube_url(url: str) -> bool:
@@ -216,7 +217,94 @@ def sanitize_output_path(output_path: str) -> str:
     return str(path.absolute())
 
 
-def download_youtube(url: str, output_path: str, format_type: str, start: str = None, end: str = None, timeout: int = 600) -> dict:
+def download_transcript(url: str, output_path: str, language: str = 'en') -> Optional[dict]:
+    """
+    Download YouTube transcript using yt-dlp.
+
+    Args:
+        url: YouTube URL
+        output_path: Base path for output (will add .transcript.json)
+        language: Subtitle language code (default: 'en')
+
+    Returns:
+        Dict with transcript data or None if unavailable
+    """
+    transcript_file = output_path + '.transcript.json'
+
+    try:
+        # Use yt-dlp to download auto-generated subtitles
+        cmd = [
+            'yt-dlp',
+            '--skip-download',           # Don't download video/audio
+            '--write-auto-sub',           # Auto-generated captions
+            '--sub-lang', language,       # Language
+            '--sub-format', 'json3',      # JSON format with timestamps
+            '--output', output_path,      # Base output path
+            '--no-warnings',
+            url
+        ]
+
+        print(f"[PROGRESS] Downloading transcript for language: {language}", file=sys.stderr, flush=True)
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        # yt-dlp creates: {output_path}.{lang}.json3
+        json3_file = f"{output_path}.{language}.json3"
+
+        if not os.path.exists(json3_file):
+            print(f"[PROGRESS] No transcript available", file=sys.stderr, flush=True)
+            return None
+
+        # Parse JSON3 format
+        with open(json3_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Convert to standardized format
+        segments = []
+        for event in data.get('events', []):
+            if 'segs' in event:
+                # Combine text segments
+                text = ''.join(seg.get('utf8', '') for seg in event['segs'])
+                text = text.strip()
+
+                if text:
+                    start_ms = event.get('tStartMs', 0)
+                    duration_ms = event.get('dDurationMs', 0)
+
+                    segments.append({
+                        'start': start_ms / 1000.0,      # Convert to seconds
+                        'end': (start_ms + duration_ms) / 1000.0,
+                        'text': text
+                    })
+
+        # Create standardized transcript output
+        transcript_data = {
+            'segments': segments,
+            'language': language,
+            'source': 'youtube_auto',
+            'segment_count': len(segments)
+        }
+
+        # Save to .transcript.json
+        with open(transcript_file, 'w', encoding='utf-8') as f:
+            json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+
+        # Clean up intermediate file
+        os.remove(json3_file)
+
+        print(f"[PROGRESS] Transcript downloaded: {len(segments)} segments", file=sys.stderr, flush=True)
+
+        return transcript_data
+
+    except subprocess.TimeoutExpired:
+        print(f"[PROGRESS] Transcript download timeout", file=sys.stderr, flush=True)
+        return None
+    except Exception as e:
+        print(f"[PROGRESS] Transcript download failed: {e}", file=sys.stderr, flush=True)
+        return None
+
+
+def download_youtube(url: str, output_path: str, format_type: str, start: str = None, end: str = None, timeout: int = 600, transcript: bool = False) -> dict:
     """
     Download YouTube video/audio using yt-dlp CLI tool.
 
@@ -227,6 +315,7 @@ def download_youtube(url: str, output_path: str, format_type: str, start: str = 
         start: Optional start time for cropping (SS, MM:SS, or HH:MM:SS)
         end: Optional end time for cropping (SS, MM:SS, or HH:MM:SS)
         timeout: Download timeout in seconds (default: 600 = 10 mins)
+        transcript: Download YouTube auto-generated transcript with timestamps (default: False)
 
     Returns:
         dict with download metadata (file_path, title, duration, etc.)
@@ -407,6 +496,11 @@ def download_youtube(url: str, output_path: str, format_type: str, start: str = 
             except json.JSONDecodeError:
                 pass  # Ignore metadata errors
 
+        # Download transcript if requested
+        transcript_data = None
+        if transcript:
+            transcript_data = download_transcript(url, output_path, language='en')
+
         return {
             'file_path': final_output_path,
             'title': metadata.get('title', 'Unknown'),
@@ -414,6 +508,8 @@ def download_youtube(url: str, output_path: str, format_type: str, start: str = 
             'uploader': metadata.get('uploader', 'Unknown'),
             'format': format_type,
             'file_size_bytes': file_size,
+            'transcript_available': transcript_data is not None,
+            'transcript_segments': len(transcript_data['segments']) if transcript_data else 0
         }
 
     except subprocess.TimeoutExpired:
@@ -471,6 +567,11 @@ Examples:
         default=None,
         help='End time for cropping (formats: SS, MM:SS, or HH:MM:SS). Example: "3:45" or "225"'
     )
+    parser.add_argument(
+        '--transcript',
+        action='store_true',
+        help='Download YouTube auto-generated transcript with timestamps'
+    )
 
     args = parser.parse_args()
 
@@ -485,7 +586,8 @@ Examples:
             format_type=args.format,
             start=args.start,
             end=args.end,
-            timeout=args.timeout
+            timeout=args.timeout,
+            transcript=args.transcript
         )
 
         # Output JSON to stdout (follows project pattern)
