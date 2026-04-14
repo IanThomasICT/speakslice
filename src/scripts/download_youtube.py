@@ -232,6 +232,8 @@ def download_transcript(url: str, output_path: str, language: str = 'en') -> Opt
     transcript_file = output_path + '.transcript.json'
 
     try:
+        # TODO: Prefer manual captions over auto-generated — run with --write-sub first,
+        #       fall back to --write-auto-sub only when no manual captions exist
         # Use yt-dlp to download auto-generated subtitles
         cmd = [
             'yt-dlp',
@@ -499,6 +501,7 @@ def download_youtube(url: str, output_path: str, format_type: str, start: str = 
         # Download transcript if requested
         transcript_data = None
         if transcript:
+            # TODO: Accept language as a parameter instead of hardcoding 'en'; use video metadata language as default
             transcript_data = download_transcript(url, output_path, language='en')
 
         return {

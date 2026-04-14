@@ -372,6 +372,8 @@ function UploadTab({ onResults }: { onResults: (data: ProcessedData, collectionI
   return (
     <div className="max-w-xl mx-auto mb-8">
       <form onSubmit={handleSubmit} className="space-y-3">
+        {/* TODO: Replace plain file input with drag-and-drop zone (onDragOver, onDrop handlers);
+                  README advertises drag-and-drop but it is not implemented */}
         <input
           type="file"
           accept="audio/*,video/*"
@@ -584,6 +586,9 @@ function UploadTab({ onResults }: { onResults: (data: ProcessedData, collectionI
 }
 
 // Collections Tab Component
+// TODO: Add search/filter input to collections list (filter by name or date)
+// TODO: Add bulk rename — select multiple collections and rename all speakers at once
+// TODO: Add playlist support — select multiple YouTube URLs and process them in sequence
 function CollectionsTab({ onLoadCollection }: { onLoadCollection: (id: string) => void }) {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [loading, setLoading] = useState(true);
@@ -724,6 +729,8 @@ function TranscriptSegment({
 }
 
 // Audio Player Component
+// TODO: Add keyboard shortcuts — space = play/pause, left/right arrow = seek ±5s, up/down arrow = speed change
+// TODO: Add picture-in-picture support for YouTube player (document.pictureInPictureElement API)
 function MediaPlayer({
   collectionId,
   youtubeUrl,
@@ -1137,6 +1144,8 @@ function ResultsDisplay({
 
   return (
     <div className="max-w-4xl mx-auto">
+      {/* TODO: Add export button — download transcript as SRT and VTT formats */}
+      {/* TODO: For YouTube collections, add toggle to switch between embedded video player and audio-only player */}
       <div className="flex justify-between items-center mb-6">
         <div className="flex items-baseline gap-6 text-xs text-gray-500">
           <div><span>{data.duration_sec ? data.duration_sec.toFixed(0) : '?'}</span>s</div>

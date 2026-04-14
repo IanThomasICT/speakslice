@@ -7,6 +7,7 @@ import { serve } from "bun";
 import { nanoid } from "nanoid";
 // spawn() creates child processes to run Python scripts and capture their output
 // fs operations handle file uploads and cleanup
+// FIXME: exec is used at /v1/file/duration and audio trimming but not imported here — both endpoints throw ReferenceError at runtime
 import { spawn } from "node:child_process";
 import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
@@ -501,6 +502,7 @@ app.post("/v1/file/duration", async (c) => {
 
       // Use ffprobe to extract duration
       const ffprobeResult = await new Promise<string>((resolve, reject) => {
+        // FIXME: exec is not imported — add exec to the import on line 10
         exec(
           `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${tmpFile}"`,
           (error, stdout, stderr) => {
@@ -668,6 +670,7 @@ app.post("/v1/process", async (c) => {
         ffmpegCmd += ` -c copy "${trimmedPath}"`;
 
         await new Promise<void>((resolve, reject) => {
+          // FIXME: exec is not imported — add exec to the import on line 10
           exec(ffmpegCmd, (error, stdout, stderr) => {
             if (error) {
               debug("PREPROCESS", "Trimming failed", { error: stderr.substring(0, 200) });
@@ -692,6 +695,8 @@ app.post("/v1/process", async (c) => {
     const transcriptPath = outWav + '.transcript.json';
     const hasTranscript = transcriptAvailable &&
                           await fs.access(transcriptPath).then(() => true).catch(() => false);
+    // TODO: Accept a user-supplied force_asr flag to skip transcript even when available
+    // TODO: Hybrid mode — use ASR for segments where transcript confidence is low
 
     let diarSegments: DiarSeg[];
     let asrResult: any;

@@ -134,6 +134,8 @@ def main():
             "start": round(turn.start, 3),  # 3 decimals = millisecond precision
             "end": round(turn.end, 3),
             "speaker": speaker,  # e.g., "SPEAKER_00", "SPEAKER_01"
+            # TODO: Detect overlapping speech — check if any other speaker segment intersects this turn's time range
+            #       and set has_overlap=True; requires a post-processing pass after all segments are collected
             "has_overlap": False  # pyannote basic doesn't flag overlaps in this output; post-MVP feature
         })
 
