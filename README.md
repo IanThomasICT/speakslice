@@ -163,7 +163,12 @@ Files:
 - Diarization: Batch size 32 (vs 1-4 default), explicit CPU config
 - YouTube: Skip ASR when transcript available, optimized diarization settings
 
-**Debug mode:** `bun run dev:debug` shows `[TIMING]` and `[PROGRESS]` logs
+**Debug mode:** `bun run dev:debug` enables detailed logging:
+- File upload details
+- `[PROGRESS]` messages from Python scripts
+- `[TIMING]` logs (model load, inference)
+- Cache persistence locations
+- Pipeline stage progress (0-100%)
 
 ## YouTube Pipeline Optimization
 
@@ -250,6 +255,45 @@ speakslice/
 - No paid APIs or services
 - Models cached after first run
 
+## UI Architecture
+
+Single-file React app (`src/app.tsx`, ~1100 lines) with all components colocated.
+
+**Component Hierarchy:**
+```
+App
+├── Header
+├── TabNavigation
+├── UploadTab (when activeTab === 'upload')
+│   └── (file input, YouTube URL, custom name field, options form)
+├── CollectionsTab (when activeTab === 'collections')
+│   └── (grid of collection cards with custom names and YouTube badges)
+└── ResultsDisplay (when currentData exists)
+    ├── MediaPlayer (unified video/audio player)
+    │   ├── (YouTube iframe player OR audio element)
+    │   └── (sticky controls with Intersection Observer)
+    └── TranscriptSegment (map over segments)
+        └── (color-coded speaker snippets)
+```
+
+**MediaPlayer** — unified video/audio player:
+- Supports both YouTube videos (via YouTube IFrame API) and audio files
+- Conditionally renders YouTube iframe OR audio element based on `youtubeUrl` prop
+- YouTube player: Initializes with `window.YT.Player`, tracks time via 100ms interval
+- Audio player: Standard HTML5 `<audio>` element with `timeupdate` events
+- Sticky component using Intersection Observer + `useEffect`
+- Contains: play/pause, time scrubber, playback speed (1x/1.25x/1.5x/2x), save button
+- Props: `collectionId`, `youtubeUrl`, `segments`, `onSaveNames`, `onSeek`, `onSegmentChange`
+
+**TranscriptSegment** — individual speaker snippets:
+- Color-coded left borders (`SPEAKER_COLORS` constant supports 10 speakers)
+- Interactive: hover (border expands, background fills), click-to-seek, double-click to rename
+- Props: `segment`, `colors`, `speakerName`, `isActive`, callbacks
+
+**State Management:** Simple `useState` hooks (no Redux/Context). Props drilling for 1-2 levels max. Callbacks for child → parent communication.
+
+**Styling:** Tailwind v4 via CDN in `src/index.html`. No CSS files — all styles via className.
+
 ## Web UI
 
 Access at `http://localhost:8000/app`
@@ -269,7 +313,7 @@ Access at `http://localhost:8000/app`
 
 ## Development
 
-See [CLAUDE.md](./CLAUDE.md) for detailed development guidelines, testing procedures, and architecture documentation.
+See [CLAUDE.md](./CLAUDE.md) for development guidelines, code patterns, and testing procedures.
 
 **Quick commands:**
 ```bash
